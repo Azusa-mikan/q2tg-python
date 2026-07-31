@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# 本地配置包含 Telegram Token，绝不能提交到仓库。
+.env
+
+# 数据
+data/
+
+# 临时脚本
+scripts/
