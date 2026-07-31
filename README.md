@@ -1,6 +1,311 @@
-# q2tg-python
+# Q2TG-Python
 
-配置从项目根目录的 `.env` 读取。首次运行前复制 `.env.example` 并填写：
+__我希望这是我最后一个大型项目了。__
+
+> [!WARNING]
+> 使用此项目时，应严格遵守《中华人民共和国》相关法律。
+>
+> 因使用此项目导致的法律纠纷，本人概不负责。
+
+> [!NOTE]
+> 本项目所有代码均由 AI 编写。
+>
+> 若不满，可自行更换其他相关项目。
+
+## 介绍
+
+Q2TG-Python 是一个基于 OneBot 11 与 Telegram Bot API 的双向群消息桥接服务。
+它通过 OneBot 反向 WebSocket 接收消息，并将已绑定的 OneBot 群与 Telegram 群连接起来。
+
+## 功能
+
+- OneBot 群与 Telegram 群一对一绑定
+- 双向转发文本、图片、图片组、GIF、文件、视频和贴纸
+- 保留消息回复关系与来源引用
+- 映射两侧消息并支持双向撤回
+- HEVC、VP9、WebP 等媒体兼容转换
+- SQLite 持久化群绑定、群设置和消息映射
+- 独立配置两侧 HTTP 或 SOCKS5 代理
+- 消息发送失败重试和最终失败通知
+
+## 工作方式
+
+```text
+OneBot 群
+    │
+    │ OneBot 11 反向 WebSocket
+    ▼
+Q2TG-Python ─── SQLite / 媒体处理 ─── Telegram Bot API
+    ▲                                      │
+    └──────────────────────────────────────┘
+                 双向消息转发
+```
+
+服务启动后会运行 FastAPI、SQLite 和媒体处理任务；OneBot WebSocket 通过鉴权后，才会在
+该连接存续期间运行 Telegram Bot 与消息消费者。群绑定及消息映射保存在
+`data/q2tg.db`，消息映射默认保留 30 天。
+
+## 环境要求
+
+- 部署：Docker Engine、Docker Compose 插件、Telegram Bot token
+- 开发：Python 3.13+、[uv](https://docs.astral.sh/uv/)、ffmpeg、ffprobe
+
+仓库提供的 Compose 已包含 [SnowLuma](https://github.com/SnowLuma/SnowLuma)；使用其他
+OneBot 11 实现时，需要自行保证反向 WebSocket 和媒体地址的网络可达性。
+
+> [!NOTE]
+> 本项目仅在 SnowLuma 上进行过充分测试。NapCat 等其他 OneBot 11 实现需要使用者自行
+> 测试兼容性；本项目不保证连接、消息、媒体、回复或撤回等行为符合预期。
+
+## Docker 部署
+
+Docker Compose 是推荐且唯一面向生产使用的部署方式。`docker-compose.yaml` 包含
+Q2TG-Python 与 SnowLuma，运行前需要准备 Docker Engine、Compose 插件和 Telegram Bot。
+
+### 准备配置
+
+```bash
+mkdir q2tg-python
+cd q2tg-python
+curl --fail --location --remote-name \
+  https://raw.githubusercontent.com/Azusa-mikan/q2tg-python/main/docker-compose.yaml
+```
+
+在同一目录创建 `.env`，供 Compose 执行变量插值：
+
+```dotenv
+Q2TG_ONEBOT_TOKEN=replace-with-a-random-token
+Q2TG_TGBOT_TOKEN=replace-with-telegram-bot-token
+Q2TG_TGBOT_ADMIN=123456789
+Q2TG_ONEBOT_PROXY_URL=
+Q2TG_TGBOT_PROXY_URL=
+
+SNOWLUMA_HOSTNAME=snowluma-device
+SHOWLUMA_MAC_ADDRESS=02:42:ac:11:00:02
+SNOWLUMA_VNC_PASSWD=replace-with-a-strong-vnc-password
+SNOWLUMA_UID=1000
+SNOWLUMA_GID=1000
+```
+
+| 配置项 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `Q2TG_ONEBOT_TOKEN` | 是 | 无 | OneBot 反向 WebSocket 的 Bearer token |
+| `Q2TG_TGBOT_TOKEN` | 是 | 无 | Telegram Bot token |
+| `Q2TG_TGBOT_ADMIN` | 是 | 无 | 有权执行 `/bind`、`/unbind` 的 Telegram 用户 ID |
+| `Q2TG_ONEBOT_PROXY_URL` | 否 | 空 | OneBot 媒体下载代理 |
+| `Q2TG_TGBOT_PROXY_URL` | 否 | 空 | Telegram Bot API 和文件下载代理 |
+| `SNOWLUMA_HOSTNAME` | 是 | 无 | 固定的 SnowLuma 容器主机名 |
+| `SHOWLUMA_MAC_ADDRESS` | 是 | 无 | 固定的 SnowLuma 容器 MAC 地址 |
+| `SNOWLUMA_VNC_PASSWD` | 否 | `vncpasswd` | VNC 密码，部署时应覆盖默认值 |
+| `SNOWLUMA_UID` | 否 | `1000` | SnowLuma 数据目录的 UID |
+| `SNOWLUMA_GID` | 否 | `1000` | SnowLuma 数据目录的 GID |
+
+`Q2TG_ONEBOT_TOKEN` 可通过 `openssl rand -hex 32` 生成；Telegram Bot token 从
+[@BotFather](https://t.me/BotFather) 获取。代理支持 `http://`、`https://`、
+`socks5://` 和 `socks5h://`，留空表示直连。程序不读取 `HTTP_PROXY`、
+`HTTPS_PROXY` 或 `ALL_PROXY`。
+
+`SNOWLUMA_HOSTNAME` 推荐使用 `DESKTOP-{随机 5-6 位大写字母或数字}` 的格式，例如
+`DESKTOP-A7K2QF`。可生成一个 6 位后缀：
+
+```bash
+openssl rand -hex 3 | tr '[:lower:]' '[:upper:]'
+```
+
+> [!CAUTION]
+> `.env` 包含真实凭据，不应提交到 Git。
+
+> [!IMPORTANT]
+> 首次登录后请保持 `SNOWLUMA_HOSTNAME`、`SHOWLUMA_MAC_ADDRESS` 以及 `snowluma-*`
+> bind mount 不变。修改设备标识或丢失登录数据可能触发平台安全验证，并导致会话失效。
+
+### 启动
+
+```bash
+docker compose pull
+docker compose up -d
+docker compose ps
+```
+
+日志：
+
+```bash
+docker compose logs -f q2tg-python
+docker compose logs -f snowluma
+```
+
+Compose 使用 bind mount 持久化以下目录：
+
+- `./q2tg-data`：SQLite 数据库
+- `./snowluma-data`：SnowLuma 数据
+- `./snowluma-qq-config`：账号配置
+- `./snowluma-qq-data`：账号数据
+
+SnowLuma 暴露的端口：
+
+| 端口 | 用途 |
+| --- | --- |
+| `5900` | VNC |
+| `6081` | Web VNC |
+| `5099` | SnowLuma WebUI |
+| `3000`、`3001` | SnowLuma 服务端口 |
+
+### 接入 OneBot
+
+通过 VNC 完成账号登录，然后在 SnowLuma 中添加 OneBot 11 反向 WebSocket：
+
+```text
+URL:   ws://q2tg-python:8000/ws
+Token: Q2TG_ONEBOT_TOKEN 的值
+```
+
+两个服务加入同一个 Compose 网络，`q2tg-python` 是容器内 DNS 服务名。Compose 已将
+`Q2TG_ONEBOT_MEDIA_URL` 固定为 `http://q2tg-python:8000`，无需在 `.env` 中声明。
+
+OneBot WebSocket 通过鉴权后，Telegram Bot 和消息转发消费者才会开始运行。此时可在
+Telegram 中向 Bot 发送 `/start`，然后将 Bot 加入目标群聊并执行绑定命令。
+
+### 运维
+
+更新：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+停止：
+
+```bash
+docker compose down
+```
+
+> [!WARNING]
+> 不要删除上述持久化目录。`docker compose down` 不会删除 bind mount 中的数据。
+
+## OneBot 配置
+
+在 OneBot 实现中添加反向 WebSocket 连接，并使用与 `Q2TG_ONEBOT_TOKEN` 相同的 token。
+连接地址和具体配置格式取决于所使用的 OneBot 实现。
+
+当前兼容性基线为 SnowLuma。NapCat 等其他 OneBot 11 实现未经过充分测试，即使能够建立
+连接，也可能因消息段解析、媒体下载或 action 行为差异而出现非预期结果，相关兼容性需
+自行验证。
+
+需要确保：
+
+- OneBot 实现可以访问 Q2TG-Python 的监听地址
+- 鉴权 token 与项目配置一致
+- `Q2TG_ONEBOT_MEDIA_URL` 是 OneBot 侧可访问的 HTTP(S) 地址
+- 防火墙或反向代理允许对应端口及 WebSocket 连接
+
+### `Q2TG_ONEBOT_MEDIA_URL` 与 OneBot 11 实现
+
+`Q2TG_ONEBOT_MEDIA_URL` 不是 OneBot API 地址，也不是反向 WebSocket 地址。它是
+Q2TG-Python 向 OneBot 11 实现提供 Telegram 临时媒体的 HTTP(S) 基础地址。
+
+Telegram 消息包含图片、视频或文件时，Q2TG-Python 会生成类似下面的 OneBot 11 消息段：
+
+```json
+{
+  "type": "image",
+  "data": {
+    "file": "http://q2tg-python:8000/media/random-media-id"
+  }
+}
+```
+
+OneBot 11 实现收到消息段后，需要主动访问 `file` URL 下载媒体，再将其发送到 OneBot
+群。因此该地址必须从 **OneBot 11 实现所在的网络环境** 中可访问，而不是只要求浏览器
+或 Q2TG-Python 自身可以访问。
+
+常见部署方式：
+
+| 部署关系 | `Q2TG_ONEBOT_MEDIA_URL` 示例 |
+| --- | --- |
+| 使用仓库提供的 Compose，Q2TG-Python 与 SnowLuma 位于同一网络 | `http://q2tg-python:8000` |
+| 两者直接运行在同一台宿主机 | `http://127.0.0.1:8000`，前提是 OneBot 实现不在独立容器中 |
+| OneBot 11 实现在另一个 Docker 容器中 | Q2TG-Python 的容器服务名和容器端口，且两个容器必须共用网络 |
+| OneBot 11 实现在另一台设备上 | Q2TG-Python 宿主机的局域网 IP、域名或反向代理 HTTPS 地址 |
+
+> [!WARNING]
+> 在容器中，`127.0.0.1` 指向容器自身。如果 SnowLuma 与 Q2TG-Python 分属两个容器，
+> 将该配置写成 `http://127.0.0.1:8000` 会导致 SnowLuma 无法下载媒体。
+
+媒体 URL 使用不可预测的随机 ID，并且仅临时有效。OneBot 11 实现应在收到发送请求后及时
+下载，不应长期保存或延迟解析 URL。如果文本可以转发但图片、视频或文件失败，应优先从
+OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向代理可达性。
+
+## Telegram 命令
+
+以下命令应在 Telegram 群聊中使用：
+
+| 命令 | 权限 | 说明 |
+| --- | --- | --- |
+| `/start` | 所有人 | 检查 Bot 是否启动 |
+| `/bind <OneBot 群号>` | 配置的 Bot 管理员 | 绑定当前 Telegram 群与 OneBot 群 |
+| `/unbind` | 配置的 Bot 管理员 | 解除当前群的绑定 |
+| `/forward [on\|off]` | Telegram 群管理员 | 查询或设置 Telegram 到 OneBot 的转发状态 |
+| `/id_show [on\|off]` | Telegram 群管理员 | 查询或设置无名 OneBot 用户的数字 ID 显示 |
+| `/undo` | 按实现权限检查 | 回复目标消息后撤回两侧对应消息 |
+
+绑定示例：
+
+```text
+/bind 123456789
+```
+
+每个 OneBot 群和 Telegram 群只能参与一个绑定关系。
+
+## 数据与限制
+
+- SQLite 数据库位于 `data/q2tg.db`
+- Docker 部署应持久化 `/app/data`
+- 消息映射默认保留 30 天
+- 单个下载媒体的大小上限为 20 MB
+- 视频和贴纸转换依赖 ffmpeg、ffprobe 与 Pillow
+- 删除容器前未持久化 `/app/data` 会丢失群绑定和消息映射
+
+## 常见问题
+
+### Bot 无法连接
+
+检查 OneBot 反向 WebSocket 地址、端口和 token 是否一致，并确认网络允许 WebSocket
+连接。Docker 部署还需要确认端口已发布。
+
+### Telegram 消息无法转发
+
+确认当前 Telegram 群已经通过 `/bind` 绑定，并使用 `/forward` 检查转发开关。同时检查
+Telegram Bot 是否有读取和发送群消息所需的权限。
+
+### 图片或视频转发失败
+
+检查媒体是否超过 20 MB、`Q2TG_ONEBOT_MEDIA_URL` 是否可访问，以及系统中的 ffmpeg 和
+ffprobe 是否可用。
+
+### Docker 容器无法写入数据库
+
+命名 volume 通常不需要额外处理。使用宿主机目录时，请确保挂载目录允许 UID/GID
+`10001` 写入。
+
+## 安全提示
+
+- 不要公开 `.env`、Bot token 或 OneBot token
+- 建议仅向可信网络开放服务端口
+- 使用公网地址时建议通过 HTTPS 和可信反向代理提供服务
+- 定期备份 `data/q2tg.db`
+- token 泄露后应立即撤销并重新生成
+
+## 本地开发与测试
+
+> [!IMPORTANT]
+> 不推荐使用本地方式部署。本节仅供开发、调试和测试使用，正式运行请使用 Docker。
+
+复制完整的开发配置模板并按需修改：
+
+```bash
+cp .env.example .env
+```
 
 ```dotenv
 Q2TG_APP_PORT=8000
@@ -12,43 +317,50 @@ Q2TG_TGBOT_ADMIN=123456789
 Q2TG_TGBOT_PROXY_URL=
 ```
 
-`Q2TG_APP_PORT` 可省略，默认使用 `8000`。
+`Q2TG_APP_PORT` 是本地 HTTP 服务和 OneBot 反向 WebSocket 的监听端口，默认值为
+`8000`。`Q2TG_ONEBOT_MEDIA_URL` 必须是 OneBot 侧能够访问的本服务 HTTP(S) 地址。
+进程中的同名环境变量优先于 `.env`。
 
-`Q2TG_ONEBOT_PROXY_URL` 和 `Q2TG_TGBOT_PROXY_URL` 均可选，支持 `http://`、
-`https://`、`socks5://` 和 `socks5h://`：
-
-- `Q2TG_ONEBOT_PROXY_URL` 用于 Onebot CDN 媒体下载。
-- `Q2TG_TGBOT_PROXY_URL` 用于 Telegram Bot API、long polling 和 Telegram 文件下载。
-
-进程中的同名 `Q2TG_*` 环境变量优先于 `.env`。Docker 可以直接注入全部环境变量，
-无需挂载或创建 `.env` 文件。程序不会隐式读取 `HTTP_PROXY`、`HTTPS_PROXY` 或
-`ALL_PROXY`；两侧代理仅由上述项目配置控制。
-
-## Docker
-
-镜像基于 Python 3.13 Alpine，构建阶段使用 uv 锁定安装依赖，运行阶段包含
-`ffmpeg`、`ffprobe` 和 H.264/HEVC/VP9/GIF 编解码能力检查。所有配置均可通过
-Docker 环境变量注入，无需把 `.env` 复制进镜像。
+安装锁定依赖：
 
 ```bash
-docker build --pull --progress=plain -t q2tg-python:latest .
-
-docker run --detach \
-  --name q2tg \
-  --restart unless-stopped \
-  --publish 8000:8000 \
-  --volume q2tg-data:/app/data \
-  --env Q2TG_ONEBOT_TOKEN="replace-with-onebot-token" \
-  --env Q2TG_ONEBOT_MEDIA_URL="http://host.example:8000" \
-  --env Q2TG_TGBOT_TOKEN="replace-with-telegram-bot-token" \
-  --env Q2TG_TGBOT_ADMIN="123456789" \
-  q2tg-python:latest
+uv sync --locked
 ```
 
-`Q2TG_APP_PORT` 默认是 `8000`。如果覆盖容器内监听端口，`--publish` 的容器端口也要
-同步调整。`/app/data` 必须使用 volume 持久化，否则删除容器会丢失群绑定和消息映射。
-容器使用非 root 用户 `q2tg`（UID/GID `10001`）；使用宿主机目录绑定 `/app/data` 时，
-该目录必须允许 UID `10001` 写入。
+启动服务：
 
-所有构建命令均为无人值守模式：uv 使用锁文件、禁用进度输出且不下载 Python，apk 使用
-`--no-cache`，不会出现安装确认或其他交互式操作。
+```bash
+uv run --locked python main.py
+```
+
+服务默认监听 `0.0.0.0:8000`。可通过以下接口检查运行状态：
+
+```text
+GET /healthz
+```
+
+正常响应：
+
+```json
+{"status":"ok"}
+```
+
+运行单元测试：
+
+```bash
+uv run --locked python -W error::ResourceWarning -m unittest discover -s tests
+```
+
+运行静态检查：
+
+```bash
+uv run --locked --with pyright pyright main.py src tests
+uv run --locked --with ruff ruff check .
+uv run --locked python -m compileall -q main.py src tests
+```
+
+## 许可证
+
+本项目使用 [q2tg-python Source-Available Non-Commercial Share-Alike License 1.1](LICENSE)。
+这不是 OSI 定义的开源许可证，并且禁止未经授权的商业使用。使用、修改或分发本项目
+前，请阅读完整许可证条款。

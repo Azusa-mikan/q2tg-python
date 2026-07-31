@@ -1,0 +1,177 @@
+q2tg-python Source-Available Non-Commercial Share-Alike License
+
+Version: 1.1
+Effective Date: 2026-07-31
+Copyright © 2026 Azusa-mikan and contributors
+
+This license is not an open source license as defined by the Open Source Initiative (OSI).
+It restricts commercial use but permits viewing, studying, using, modifying, and distributing the Software and Modified Versions under non-commercial conditions.
+
+1. Definitions
+
+1.1 "Software" means the source code, documentation, examples, configuration files, and other materials released with the q2tg-python project, excluding parts explicitly identified as third-party components.
+
+1.2 "Original Copyright Holder" means the copyright holder who first released q2tg-python under this license using the name Azusa-mikan. The license notice email address is diao0cheng@gmail.com.
+
+1.3 "Project Maintainer" means an individual, organization, or entity explicitly designated by the Original Copyright Holder to maintain the official q2tg-python repository or official releases. Project Maintainers do not, merely by holding that role, acquire the Original Copyright Holder's copyrights or authority to issue commercial licenses, revoke licenses, or sublicense rights.
+
+1.4 "Project" means the official q2tg-python repository, official releases, and official contribution channels maintained by the Original Copyright Holder or Project Maintainers.
+
+1.5 "You" means any individual, organization, or entity that obtains, copies, uses, modifies, or distributes the Software.
+
+1.6 "Written Form" includes paper documents and email whose content and sender can be retained and verified. A commercial license, additional authorization, revocation, or restoration by the Original Copyright Holder must be sent from the license notice email address or expressly confirmed by the Original Copyright Holder through another verifiable method. Sending email to the license notice address does not constitute approval; silence or failure to reply is not authorization, consent, or waiver.
+
+1.7 "Commercial Use" means using the Software directly or indirectly to obtain commercial benefit, monetary compensation, or commercial advantage, including but not limited to:
+
+- selling, renting, or reselling the Software;
+- providing paid hosting, deployment, setup, operation, training, consulting, maintenance, or security audit services based on the Software;
+- incorporating the Software or a Modified Version into a commercial product, commercial service, paid platform, or commercial solution;
+- operating the Software for third parties through fees, subscriptions, memberships, paid enhancements, or other compensation;
+- obtaining benefits from use of the Software through advertising, commercial sponsorship, donations carrying benefits, promotion, customer acquisition, or traffic generation;
+- bundling the Software with other paid products or services, or shifting its use, deployment, or maintenance costs through another product or service;
+- using the Software within a commercial organization for revenue-generating products, services, operations, or internal business processes;
+- providing Software-based functionality without charge in order to sell, promote, or enhance another commercial product, service, or activity.
+
+1.8 A wholly voluntary donation carrying no benefits, services, promotional return, priority support, access rights, or other consideration is not Commercial Use. A purported donation exchanged for any benefit or return remains Commercial Use.
+
+1.9 "Non-Commercial Use" means use that is not Commercial Use under Section 1.7, including personal study, research, experimentation, non-commercial self-hosting, nonprofit projects, and non-commercial community projects.
+
+1.10 Commissioned development, bug fixing, testing, documentation, maintenance, or security auditing of the Software itself, when commissioned by the Original Copyright Holder or a Project Maintainer, is not Commercial Use, provided that the resulting work is submitted to the Project or distributed under this license. This exception does not apply to work for third-party business projects, internal systems, paid services, or commercial products.
+
+1.11 "Modified Version" means a software version subject to the Original Copyright Holder's copyright because it copies Software code and modifies, adds to, deletes from, rewrites, refactors, translates, or ports that code, or because it contains Software code or modified Software code.
+
+A bot, application, or business code that only imports or calls q2tg-python's public APIs; a plugin, adapter, or extension that interacts with q2tg-python through public interfaces; and an independent work deployed with q2tg-python without copying or modifying q2tg-python code are not Modified Versions and are not subject to this license's share-alike requirements. This exclusion does not release any q2tg-python code actually copied or modified within such a work from this license.
+
+1.12 "Distribution" means providing a copy of the Software or a Modified Version to any third party by any means, whether publicly or privately and whether free of charge or for payment. Running the Software only on your own devices, or using it within one organization without providing a copy outside that organization, is not Distribution; internal use by a commercial organization remains subject to the Commercial Use restriction.
+
+1.13 "Corresponding Source" means the complete, human-readable source form customarily used to read, understand, modify, and rebuild the Software or Modified Version, including scripts, configuration, and interface definitions required for modification and building, but excluding general-purpose tools and unmodified third-party dependencies that need not be distributed with the Software.
+
+2. Grant
+
+Subject to compliance with every term of this license, the Original Copyright Holder grants You a worldwide, royalty-free, non-exclusive, non-transferable, revocable license to:
+
+2.1 view, read, and study the Software source code;
+
+2.2 copy, install, run, and use the Software for non-commercial purposes;
+
+2.3 modify the Software and create Modified Versions for non-commercial purposes;
+
+2.4 distribute the Software or Modified Versions subject to Section 3.
+
+"Non-transferable" does not prohibit compliant Distribution under Section 3. A recipient obtains the applicable license directly from the relevant copyright holders under this license, subject to the recipient's compliance.
+
+3. Distribution Conditions
+
+You may distribute the Software or a Modified Version only if all of the following conditions are met:
+
+3.1 the Distribution is non-commercial;
+
+3.2 the complete and unmodified text of version 1.1 of this license is included;
+
+3.3 all existing copyright notices, author attribution, project source notices, license notices, and other notices are retained and are not removed, obscured, or misleadingly altered;
+
+3.4 a Modified Version clearly states that it is based on q2tg-python, identifies that You made changes, and reasonably describes the principal changes;
+
+3.5 the entire Modified Version continues to be licensed under version 1.1 of this license, without additional terms that conflict with this license or restrict a recipient's exercise of rights under it;
+
+3.6 Corresponding Source is provided with every Distribution of the Software or a Modified Version. It may accompany the copy or be made available through a stable method that requires neither additional payment nor acceptance of additional terms. It must remain available to the relevant recipients for as long as You continue distributing the applicable copies;
+
+3.7 bytecode, native extensions, executables, encrypted or packed forms, compressed archives, or other non-human-readable forms may not be distributed alone without the Corresponding Source;
+
+3.8 You must not intentionally hinder a recipient's ability to read, understand, or modify the Corresponding Source through identifier randomization, control-flow obfuscation, encryption, packing, removal of information necessary to understand and modify the code, or other technical measures primarily intended to conceal Software code or modifications. Normal formatting, packaging, compilation, and performance optimization are not prohibited obfuscation by themselves, but remain subject to Sections 3.6 and 3.7;
+
+3.9 You must not use the names of q2tg-python, the Original Copyright Holder, authors, or contributors to imply that a Modified Version is officially approved, endorsed, or maintained by them without the Original Copyright Holder's prior express permission in Written Form.
+
+4. Restrictions
+
+Without the Original Copyright Holder's prior authorization in Written Form, You must not:
+
+4.1 make any Commercial Use of the Software or a Modified Version;
+
+4.2 sell, rent, resell, provide paid hosting, deployment, setup, or operation of the Software or a Modified Version, or provide another paid service based on either;
+
+4.3 incorporate the Software or a Modified Version into a commercial product, commercial service, paid platform, or commercial solution;
+
+4.4 remove, obscure, or misleadingly alter copyright notices, license notices, project source notices, or disclaimers in the Software;
+
+4.5 state or imply that the Project has an official affiliation, authorization, endorsement, or partnership with any software, platform, service, organization, or entity unless expressly stated by the Original Copyright Holder in Written Form.
+
+5. Share-Alike and Independent Works
+
+5.1 Modifications to Software code and any Modified Version containing Software code or modified Software code must be licensed in their entirety under version 1.1 of this license when distributed.
+
+5.2 An independent bot, application, plugin, adapter, extension, or other independent work excluded by Section 1.11 may use a license selected by its rights holder, including a proprietary or commercial license. Commercial Use of q2tg-python itself still requires separate authorization.
+
+5.3 You may retain attribution and copyrights in your original modifications, but may not thereby weaken this license's application to Software code or modifications of it.
+
+6. Reserved Rights
+
+Except for copyright and patent licenses expressly granted by this license, no trademark, service mark, project name, logo, domain name, or other intellectual property right is granted. All rights not expressly granted are reserved by their respective rights holders.
+
+7. Contributions
+
+7.1 Unless otherwise agreed in Written Form, each contributor who submits code, documentation, examples, configuration, or other material to the Project confirms that they have the right to submit it and grants the Original Copyright Holder a worldwide, royalty-free, non-exclusive, perpetual, irrevocable, sublicensable license to use, copy, modify, merge, publish, distribute, and license the contribution under this license as part of the Software.
+
+7.2 To license a contributor's contribution under another license, the Original Copyright Holder must obtain the contributor's additional permission in Written Form or ensure that the contribution is already available under another lawful authorization granting the required rights.
+
+7.3 Contributors retain copyrights they lawfully hold in their contributions. This Section does not alter their lawful attribution rights in original contributions.
+
+7.4 Contributors must not submit material they lack authority to license or material that would cause the Software to violate a third-party license, patent, or other legal obligation.
+
+8. Patent License
+
+8.1 The Original Copyright Holder and each contributor grant You a worldwide, royalty-free, non-exclusive, non-transferable, irrevocable patent license under patent claims they have authority to license and that are necessarily practiced by the Software or their contribution, solely to make, use, run, modify, and distribute the Software or Modified Versions within the non-commercial scope of this license.
+
+8.2 If You assert in litigation, a counterclaim, or another legal proceeding that the Software or any contribution directly or indirectly infringes your patent, every patent license granted to You under Section 8.1 terminates automatically on the date of that assertion.
+
+8.3 Section 8.1 excludes patents the grantor lacks authority to license and patent claims not necessarily practiced by the Software or relevant contribution itself.
+
+9. Third-Party Components
+
+The Software may include or reference third-party code, dependencies, documentation, or resources. Third-party components remain governed by their respective licenses. This license does not alter rights granted or restricted by those licenses.
+
+10. Unofficial Status and Compliance Responsibility
+
+q2tg-python is an independent third-party project and has no official affiliation, authorization, endorsement, or partnership with any software, platform, service, organization, or entity unless expressly stated by the Original Copyright Holder in Written Form.
+
+You are responsible for ensuring that use of the Software and any runtime, platform, or service connected to it complies with applicable law, regulation, platform terms, and related agreements. You bear the risks of account restrictions, data loss, service interruption, platform restrictions, and other consequences arising from such use.
+
+11. Disclaimer
+
+The Software is provided "as is," without any express or implied warranty, including warranties of merchantability, fitness for a particular purpose, non-infringement, availability, accuracy, stability, or uninterrupted operation.
+
+To the maximum extent permitted by applicable law, the Original Copyright Holder, Project Maintainers, and contributors are not liable for any direct, indirect, incidental, special, punitive, or consequential damages arising from use, inability to use, modification, Distribution, or reliance on the Software, including account restrictions, data loss, lost profits, business interruption, or third-party claims.
+
+12. Termination, Revocation, and Restoration
+
+12.1 Violation of any term automatically terminates the copyright and patent rights granted to You under this license.
+
+12.2 After termination, You must stop using, copying, modifying, and distributing the Software and Modified Versions and, to the extent lawful and technically feasible, delete copies under your control. Copies lawfully distributed to third parties before your violation may continue to be used by their recipients while those recipients comply and their licenses have not separately been revoked.
+
+12.3 Stopping, correcting, or compensating for a violation does not automatically restore a terminated license. Rights are restored only when expressly restored by the Original Copyright Holder in Written Form and take effect at the time and within the scope stated in that restoration.
+
+12.4 The Original Copyright Holder may revoke the copyright license granted to a specified subject by written notice. Email sent to an address publicly announced by that subject, previously used to contact the Project, or provided to the Project is deemed delivered when it enters that email system if no automated non-delivery response is received; evidence of a different actual delivery time controls. The revoked subject must stop using, copying, modifying, and distributing the Software and Modified Versions upon receipt.
+
+12.5 Revocation against a specified subject does not affect copies lawfully obtained by third parties before revocation or their continuing rights under this license unless a recipient independently violates this license or its license is separately revoked.
+
+12.6 The Original Copyright Holder may stop making future versions publicly available under this license without affecting copies lawfully obtained earlier, except where a specified subject's license is revoked under Section 12.4.
+
+13. Additional Authorization
+
+Commercial Use or authorization exempting a user from any part of this license requires the Original Copyright Holder's prior express permission in Written Form. Additional authorization is effective only for the subjects, versions, purposes, duration, and scope it expressly identifies.
+
+14. Severability
+
+If any term is found invalid, unenforceable, or contrary to applicable law, it shall be adjusted or excluded only to the minimum extent necessary, and the remaining terms continue in effect.
+
+15. No Waiver
+
+Failure or delay by the Original Copyright Holder in exercising a right under this license is not a waiver and does not prevent later exercise of that right.
+
+16. Entire License and Headings
+
+This license constitutes the complete public license terms granted for the Software. Section headings are for convenience only and do not affect interpretation. A modification, waiver, commercial license, or additional authorization is effective only when expressly made by the Original Copyright Holder in Written Form under this license.
+
+17. Governing Law
+
+The interpretation, validity, performance, and dispute resolution of this license are governed by the laws of mainland China, excluding conflict-of-law rules.

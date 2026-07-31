@@ -1,0 +1,56 @@
+services:
+  q2tg-python:
+    image: ghcr.io/azusa-mikan/q2tg-python:latest
+    container_name: q2tg-python
+    restart: unless-stopped
+    init: true
+    networks:
+      - q2tg-net
+    environment:
+      Q2TG_ONEBOT_TOKEN: "${Q2TG_ONEBOT_TOKEN:?请设置 Q2TG_ONEBOT_TOKEN}"
+      Q2TG_ONEBOT_MEDIA_URL: "http://q2tg-python:8000"
+      Q2TG_ONEBOT_PROXY_URL: "${Q2TG_ONEBOT_PROXY_URL:-}"
+      Q2TG_TGBOT_TOKEN: "${Q2TG_TGBOT_TOKEN:?请设置 Q2TG_TGBOT_TOKEN}"
+      Q2TG_TGBOT_ADMIN: "${Q2TG_TGBOT_ADMIN:?请设置 Q2TG_TGBOT_ADMIN}"
+      Q2TG_TGBOT_PROXY_URL: "${Q2TG_TGBOT_PROXY_URL:-}"
+    volumes:
+      - ./q2tg-data:/app/data
+
+  snowluma:
+    image: motricseven7/snowluma:latest
+    container_name: snowluma-bot
+    hostname: "${SNOWLUMA_HOSTNAME}"
+    restart: unless-stopped
+    shm_size: 1gb
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    networks:
+      q2tg-net:
+        mac_address: "${SHOWLUMA_MAC_ADDRESS}"
+    environment:
+      TZ: Asia/Shanghai
+      VNC_PASSWD: "${SNOWLUMA_VNC_PASSWD:-vncpasswd}"
+      SNOWLUMA_UID: "${SNOWLUMA_UID:-1000}"
+      SNOWLUMA_GID: "${SNOWLUMA_GID:-1000}"
+      SNOWLUMA_WEBUI_PORT: "5099"
+      SNOWLUMA_LOG_LEVEL: info
+      SNOWLUMA_SCREEN: 1280x720x24
+      SNOWLUMA_HOOK_AUTOLOAD: "1"
+      SNOWLUMA_EXTRA_QQ_HOMES: ""
+      SNOWLUMA_QQ_FLAGS: "--disable-gpu --disable-software-rasterizer --disable-gpu-compositing"
+    ports:
+      - "5900:5900"
+      - "6081:6081"
+      - "5099:5099"
+      - "3000:3000"
+      - "3001:3001"
+    volumes:
+      - ./snowluma-data:/app/snowluma-data
+      - ./snowluma-qq-config:/app/.config
+      - ./snowluma-qq-data:/app/.local/share
+
+networks:
+  q2tg-net:
+    driver: bridge
