@@ -28,6 +28,8 @@ Q2TG-Python 是一个基于 OneBot 11 与 Telegram Bot API 的双向群消息桥
 - 独立配置两侧 HTTP 或 SOCKS5 代理
 - 消息发送失败重试和最终失败通知
 
+各消息类型的支持程度、限制与待办事项见 [消息类型支持清单](TODO.md)。
+
 ## 工作方式
 
 ```text
