@@ -34,7 +34,7 @@ class UndoTests(unittest.IsolatedAsyncioTestCase):
     ):
         await self.sql.set_message_mapping(
             q_group_id=123,
-            q_message_id=100,
+            q_message_ids=(99, 100),
             tg_chat_id=-456,
             tg_message_ids=(200, 201),
             tg_user_id=original_user_id,
@@ -73,7 +73,10 @@ class UndoTests(unittest.IsolatedAsyncioTestCase):
             original_user_id=10,
             status=ChatMember.MEMBER,
         )
-        gateway.delete_message.assert_awaited_once_with(100)
+        self.assertEqual(
+            [call.args[0] for call in gateway.delete_message.await_args_list],
+            [99, 100],
+        )
         bot.delete_messages.assert_awaited_once_with(chat_id=-456, message_ids=(200, 201))
         command.reply_text.assert_not_awaited()
         command.delete.assert_awaited_once()
@@ -94,7 +97,7 @@ class UndoTests(unittest.IsolatedAsyncioTestCase):
             original_user_id=10,
             status=ChatMember.ADMINISTRATOR,
         )
-        gateway.delete_message.assert_awaited_once_with(100)
+        self.assertEqual(gateway.delete_message.await_count, 2)
         bot.delete_messages.assert_awaited_once()
 
     async def test_onebot_rejection_keeps_command_and_shows_error(self) -> None:
@@ -104,7 +107,7 @@ class UndoTests(unittest.IsolatedAsyncioTestCase):
             status=ChatMember.MEMBER,
             delete_error=RuntimeError("too old"),
         )
-        gateway.delete_message.assert_awaited_once_with(100)
+        self.assertEqual(gateway.delete_message.await_count, 2)
         bot.delete_messages.assert_not_awaited()
         command.delete.assert_not_awaited()
         command.reply_text.assert_awaited_with(

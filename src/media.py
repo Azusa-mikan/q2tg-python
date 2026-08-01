@@ -259,12 +259,13 @@ class MediaStream(AsyncIterator[bytes]):
             self._media._finish_close()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class CachedMedia:
-    """临时媒体文件及其 URL 的绝对过期时间。"""
+    """临时媒体文件、URL 过期时间及待发送任务持有的租约数。"""
 
     content: MediaFile
     expires_at: float
+    pins: int = 0
 
 
 class MediaCache:
@@ -274,7 +275,12 @@ class MediaCache:
         self._media: dict[str, CachedMedia] = {}
         self._media_bytes = 0
 
-    def set_media_batch(self, contents: Sequence[MediaFile]) -> tuple[str, ...]:
+    def set_media_batch(
+        self,
+        contents: Sequence[MediaFile],
+        *,
+        pinned: bool = False,
+    ) -> tuple[str, ...]:
         """整批缓存图片并返回临时 URL ID，成功后接管所有文件。"""
         self.purge_expired()
         batch_size = sum(content.size for content in contents)
@@ -286,7 +292,11 @@ class MediaCache:
         for media_id, content in zip(media_ids, contents, strict=True):
             # 活跃 HTTP 响应会延迟关闭文件，容量也必须在真正关闭时才归还。
             content.add_close_callback(lambda size=content.size: self._release_bytes(size))
-            self._media[media_id] = CachedMedia(content=content, expires_at=expires_at)
+            self._media[media_id] = CachedMedia(
+                content=content,
+                expires_at=expires_at,
+                pins=int(pinned),
+            )
         self._media_bytes += batch_size
         return media_ids
 
@@ -295,7 +305,7 @@ class MediaCache:
         media = self._media.get(media_id)
         if media is None:
             return None
-        if media.expires_at <= time.time():
+        if media.pins == 0 and media.expires_at <= time.time():
             self._remove(media_id, media)
             return None
         return media.content
@@ -304,8 +314,21 @@ class MediaCache:
         """使所有过期 URL 失效，并请求安全关闭对应临时文件。"""
         now = time.time()
         for media_id, media in list(self._media.items()):
-            if media.expires_at <= now:
+            if media.pins == 0 and media.expires_at <= now:
                 self._remove(media_id, media)
+
+    def release_media_batch(self, media_ids: Sequence[str]) -> None:
+        """释放发送任务租约，并从释放时刻开始计算 URL 的 TTL。"""
+        expires_at = time.time() + MEDIA_CACHE_TTL
+        for media_id in media_ids:
+            media = self._media.get(media_id)
+            if media is None:
+                continue
+            if media.pins <= 0:
+                raise RuntimeError("临时媒体缓存租约计数错误")
+            media.pins -= 1
+            if media.pins == 0:
+                media.expires_at = expires_at
 
     def close(self) -> None:
         """使全部 URL 失效，并请求安全关闭缓存持有的文件。"""

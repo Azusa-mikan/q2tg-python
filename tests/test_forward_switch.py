@@ -105,10 +105,10 @@ class ForwardSwitchTests(unittest.IsolatedAsyncioTestCase):
 
         message = await self._id_show(args=["off"], status=ChatMember.ADMINISTRATOR)
         self.assertFalse(await self.sql.get_id_show_enabled(-456))
-        message.reply_text.assert_awaited_once_with("无名 Onebot 用户 ID 显示已关闭")
+        message.reply_text.assert_awaited_once_with("Onebot 用户及 @ 对象 ID 显示已关闭")
 
         message = await self._id_show(args=[], status=ChatMember.OWNER)
-        message.reply_text.assert_awaited_once_with("无名 Onebot 用户 ID 显示已关闭")
+        message.reply_text.assert_awaited_once_with("Onebot 用户及 @ 对象 ID 显示已关闭")
 
     async def test_regular_member_cannot_change_id_show(self) -> None:
         message = await self._id_show(args=["off"], status=ChatMember.MEMBER)

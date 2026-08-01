@@ -7,6 +7,8 @@ from pathlib import Path
 
 import aiosqlite
 
+from src.sql_migrations import migrate_database
+
 MESSAGE_RETENTION = 30 * 24 * 60 * 60
 
 DATABASE_PATH = Path(__file__).parents[1] / "data" / "q2tg.db"
@@ -22,7 +24,7 @@ class MessageMapping:
     """
 
     q_group_id: int
-    q_message_id: int
+    q_message_ids: tuple[int, ...]
     tg_chat_id: int
     tg_message_ids: tuple[int, ...]
     q_user_id: int | None
@@ -155,35 +157,42 @@ class Sql:
     async def set_message_mapping(
         self,
         q_group_id: int,
-        q_message_id: int,
+        q_message_ids: tuple[int, ...],
         tg_chat_id: int,
         tg_message_ids: tuple[int, ...],
         q_user_id: int | None = None,
         tg_user_id: int | None = None,
     ) -> None:
-        """保存 30 天有效的消息映射，并建立所有 Telegram ID 的反向索引。"""
+        """保存 30 天有效的消息映射，并建立两侧全部 ID 的反向索引。"""
+        if not q_message_ids:
+            raise ValueError("OneBot 消息 ID 不能为空")
         if not tg_message_ids:
             raise ValueError("Telegram 消息 ID 不能为空")
+        if len(set(q_message_ids)) != len(q_message_ids):
+            raise ValueError("OneBot 消息 ID 不能重复")
+        if len(set(tg_message_ids)) != len(tg_message_ids):
+            raise ValueError("Telegram 消息 ID 不能重复")
 
         db = self._require_db()
         expires_at = time.time() + MESSAGE_RETENTION
-        placeholders = ",".join("?" for _ in tg_message_ids)
+        q_placeholders = ",".join("?" for _ in q_message_ids)
+        tg_placeholders = ",".join("?" for _ in tg_message_ids)
 
         # 任意一侧 ID 已存在时删除整条旧映射，避免留下相互矛盾的回复关系。
         async with self._db_lock:
             await db.execute("BEGIN IMMEDIATE")
             try:
-                await db.execute(
-                    "DELETE FROM message_mappings WHERE q_group_id = ? AND q_message_id = ?",
-                    (q_group_id, q_message_id),
-                )
                 cursor = await db.execute(
                     f"""
-                    SELECT DISTINCT mapping_id
+                    SELECT mapping_id
+                    FROM onebot_message_mappings
+                    WHERE q_group_id = ? AND q_message_id IN ({q_placeholders})
+                    UNION
+                    SELECT mapping_id
                     FROM telegram_message_mappings
-                    WHERE tg_chat_id = ? AND tg_message_id IN ({placeholders})
+                    WHERE tg_chat_id = ? AND tg_message_id IN ({tg_placeholders})
                     """,
-                    (tg_chat_id, *tg_message_ids),
+                    (q_group_id, *q_message_ids, tg_chat_id, *tg_message_ids),
                 )
                 conflicting_ids = [row[0] for row in await cursor.fetchall()]
                 await cursor.close()
@@ -202,7 +211,7 @@ class Sql:
                     """,
                 (
                     q_group_id,
-                    q_message_id,
+                    q_message_ids[-1],
                     tg_chat_id,
                     q_user_id,
                     tg_user_id,
@@ -213,6 +222,17 @@ class Sql:
                 await cursor.close()
                 if mapping_id is None:
                     raise RuntimeError("SQLite 未返回消息映射 ID")
+                await db.executemany(
+                    """
+                    INSERT INTO onebot_message_mappings (
+                        mapping_id, q_group_id, q_message_id, position
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        (mapping_id, q_group_id, message_id, position)
+                        for position, message_id in enumerate(q_message_ids)
+                    ),
+                )
                 await db.executemany(
                     """
                     INSERT INTO telegram_message_mappings (mapping_id, tg_chat_id, tg_message_id)
@@ -235,10 +255,11 @@ class Sql:
         async with self._db_lock:
             cursor = await db.execute(
                 """
-                SELECT id, q_group_id, q_message_id, tg_chat_id,
+                SELECT m.id, m.q_group_id, m.q_message_id, m.tg_chat_id,
                        q_user_id, tg_user_id, expires_at
-                FROM message_mappings
-                WHERE q_group_id = ? AND q_message_id = ? AND expires_at > ?
+                FROM message_mappings AS m
+                JOIN onebot_message_mappings AS q ON q.mapping_id = m.id
+                WHERE q.q_group_id = ? AND q.q_message_id = ? AND expires_at > ?
                 """,
                 (q_group_id, q_message_id, time.time()),
             )
@@ -320,6 +341,7 @@ class Sql:
                 ON message_mappings(expires_at);
                 """
             )
+            await migrate_database(self._db)
             await self._db.commit()
         except BaseException:
             await self.close()
@@ -352,6 +374,17 @@ class Sql:
         db = self._require_db()
         cursor = await db.execute(
             """
+            SELECT q_message_id
+            FROM onebot_message_mappings
+            WHERE mapping_id = ?
+            ORDER BY position
+            """,
+            (mapping_id,),
+        )
+        q_message_ids = tuple(item[0] for item in await cursor.fetchall())
+        await cursor.close()
+        cursor = await db.execute(
+            """
             SELECT tg_message_id
             FROM telegram_message_mappings
             WHERE mapping_id = ?
@@ -363,7 +396,7 @@ class Sql:
         await cursor.close()
         return MessageMapping(
             q_group_id=q_group_id,
-            q_message_id=q_message_id,
+            q_message_ids=q_message_ids or (q_message_id,),
             tg_chat_id=tg_chat_id,
             tg_message_ids=tg_message_ids,
             q_user_id=q_user_id,

@@ -22,7 +22,7 @@ class ReplyForwardingTests(unittest.IsolatedAsyncioTestCase):
         await self.cache.bind_group(123, -456)
         await self.cache.set_message_mapping(
             q_group_id=123,
-            q_message_id=100,
+            q_message_ids=(99, 100),
             tg_chat_id=-456,
             tg_message_ids=(200, 201),
         )

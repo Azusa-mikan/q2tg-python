@@ -45,6 +45,22 @@ class MediaCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cache._media_bytes, 0)
         self.assertEqual(media_item_budget.used, initial_items)
 
+    async def test_pinned_media_survives_ttl_until_task_releases_it(self) -> None:
+        initial_items = media_item_budget.used
+        cache = MediaCache()
+        media = await MediaFile.create(filename="voice.ogg", media_type="audio/ogg")
+        media.write(b"voice")
+        media_id = cache.set_media_batch((media,), pinned=True)[0]
+        cache._media[media_id].expires_at = time.time() - 1
+
+        cache.purge_expired()
+        self.assertIs(cache.get_media(media_id), media)
+        cache.release_media_batch((media_id,))
+        self.assertGreater(cache._media[media_id].expires_at, time.time())
+
+        cache.close()
+        self.assertEqual(media_item_budget.used, initial_items)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 """两个平台之间的消息转换与发送。"""
 
+import asyncio
 from functools import partial
 from mimetypes import guess_type
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import httpx
 from telegram import (
@@ -17,6 +19,7 @@ from telegram import (
 )
 from telegram.ext import ExtBot
 
+from src.audio import normalize_onebot_record
 from src.config import config
 from src.log import baselog
 from src.media import MediaFile, media_cache, media_queue_budget
@@ -48,43 +51,126 @@ ONEBOT_MEDIA_LIMIT = 20_000_000
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 MAX_SEND_ATTEMPTS = 3
 TELEGRAM_VIDEO_LIMIT = 20_000_000
+TELEGRAM_CAPTION_LIMIT = 1024
+TELEGRAM_TEXT_LIMIT = 4096
 
 
-def onebot_message_text(message: list[dict[Any, Any]]) -> str:
-    """按原顺序拼接 OneBot 消息中的 text segment。"""
-    parts = []
+async def onebot_message_text(
+    message: list[dict[Any, Any]],
+    group_id: int,
+    gateway: QGateway | None = None,
+    *,
+    id_show_enabled: bool = False,
+    member_names: dict[int, str | None] | None = None,
+) -> str:
+    """按原顺序拼接 text 和可见的 at segment。"""
+    if member_names is None:
+        member_names = {}
+    user_ids: list[int] = []
     for segment in message:
-        if segment.get("type") == "text":
-            data = segment.get("data")
+        if segment.get("type") != "at":
+            continue
+        data = segment.get("data")
+        user_id = _onebot_at_user_id(data.get("qq")) if isinstance(data, dict) else None
+        if user_id is not None and user_id not in member_names and user_id not in user_ids:
+            user_ids.append(user_id)
+    if user_ids:
+        names = await asyncio.gather(
+            *(_onebot_member_name(gateway, group_id, user_id) for user_id in user_ids)
+        )
+        member_names.update(zip(user_ids, names, strict=True))
+
+    parts: list[str] = []
+    for segment in message:
+        kind = segment.get("type")
+        data = segment.get("data")
+        if kind == "text":
             text = data.get("text") if isinstance(data, dict) else None
             if isinstance(text, str):
                 parts.append(text)
+            continue
+        if kind != "at" or not isinstance(data, dict):
+            continue
+        qq = data.get("qq")
+        if qq == "all":
+            parts.append("@全体成员")
+            continue
+        user_id = _onebot_at_user_id(qq)
+        if user_id is None:
+            continue
+        name = member_names.get(user_id)
+        if name is not None:
+            mention = f"{name}[{user_id}]" if id_show_enabled else name
+        else:
+            mention = str(user_id) if id_show_enabled else "Onebot用户"
+        parts.append(f"@{mention}")
     return "".join(parts)
+
+
+def _onebot_at_user_id(value: Any) -> int | None:
+    """解析 at.qq 的数字账号；all 和畸形值由调用方分别处理或忽略。"""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+async def _onebot_member_name(
+    gateway: QGateway | None,
+    group_id: int,
+    user_id: int,
+) -> str | None:
+    """查询 at 对象的可见名称，失败时返回 None 交给格式层兜底。"""
+    if gateway is None:
+        return None
+    try:
+        member = await gateway.get_group_member_info(group_id, user_id)
+    except Exception:  # noqa: BLE001
+        baselog.warning(
+            "OneBot 群成员信息查询失败: group=%s user=%s",
+            group_id,
+            user_id,
+        )
+        return None
+    card = member.get("card")
+    nickname = member.get("nickname")
+    if isinstance(card, str) and card.strip():
+        return card.strip()
+    if isinstance(nickname, str) and nickname.strip():
+        return nickname.strip()
+    return None
 
 
 def onebot_message_media(
     message: list[dict[Any, Any]],
-) -> tuple[list[tuple[str, str, str]], int]:
-    """提取图片、视频和文件，并统计缺少标准下载 URL 的视频。"""
+) -> tuple[list[tuple[str, str, str]], list[str]]:
+    """提取带 HTTP(S) 下载地址的媒体，并返回缺少地址的媒体类型。"""
     media = []
-    unavailable_videos = 0
+    unavailable: list[str] = []
     for segment in message:
         kind = segment.get("type")
-        if kind not in {"file", "image", "video"}:
+        if kind not in {"file", "image", "record", "video"}:
             continue
         data = segment.get("data")
         if not isinstance(data, dict):
-            if kind == "video":
-                unavailable_videos += 1
+            unavailable.append(kind)
             continue
         url = data.get("url")
-        if not isinstance(url, str) or not url:
-            if kind == "video":
-                unavailable_videos += 1
+        if not isinstance(url, str) or not _is_http_url(url):
+            unavailable.append(kind)
             continue
         filename = _onebot_media_filename(data.get("file"), kind)
         media.append((kind, url, filename))
-    return media, unavailable_videos
+    return media, unavailable
+
+
+def _is_http_url(value: str) -> bool:
+    parsed = urlsplit(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def _onebot_media_filename(file: Any, kind: str) -> str:
@@ -92,11 +178,13 @@ def _onebot_media_filename(file: Any, kind: str) -> str:
     if isinstance(file, str):
         filename = file.strip().replace("\x00", "").replace("\r", "").replace("\n", "")
         # file 在入站消息中是文件名，不是本地路径；分隔符只做安全替换。
-        filename = filename.replace("/", "_").replace("\\", "_")
+        filename = filename.replace("/", "_")
         if filename and filename not in {".", ".."}:
             return filename
     if kind == "video":
         return "video.mp4"
+    if kind == "record":
+        return "voice.silk"
     return "image" if kind == "image" else "file"
 
 
@@ -110,6 +198,7 @@ async def download_media(
     """把 OneBot 媒体流式下载到 spool，失败时关闭文件。"""
     fallback_type = {
         "image": "image/jpeg",
+        "record": "audio/silk",
         "video": "video/mp4",
     }.get(kind, "application/octet-stream")
     media = await MediaFile.create(filename=filename, media_type=fallback_type)
@@ -150,6 +239,7 @@ async def forward_onebot_to_telegram(
     msg: OneBotMessage,
     bot: ExtBot[None],
     client: httpx.AsyncClient,
+    gateway: QGateway | None = None,
 ) -> None:
     """将 OneBot 文本和图片按顺序发送到绑定的 Telegram 群。"""
     group_id = await sql.get_tg_group(msg.group_id)
@@ -157,16 +247,35 @@ async def forward_onebot_to_telegram(
         baselog.warning("OneBot 群未配置转发目标: %s", msg.group_id)
         return
 
-    text = onebot_message_text(msg.message)
     sender_name = msg.sender_name
-    if msg.sender_name_is_fallback and not await sql.get_id_show_enabled(group_id):
+    has_mentions = any(segment.get("type") == "at" for segment in msg.message)
+    id_show_enabled = (
+        bool(await sql.get_id_show_enabled(group_id))
+        if msg.sender_name_is_fallback or has_mentions
+        else False
+    )
+    text = await onebot_message_text(
+        msg.message,
+        msg.group_id,
+        gateway,
+        id_show_enabled=id_show_enabled,
+        member_names=msg.mention_names,
+    )
+    if msg.sender_name_is_fallback and not id_show_enabled:
         sender_name = "OneBot 用户"
-    media, unavailable_videos = onebot_message_media(msg.message)
-    if not text and not media and not unavailable_videos:
+    media, unavailable = onebot_message_media(msg.message)
+    if not text and not media and not unavailable:
         baselog.warning("OneBot 消息没有可转发的内容: %s", msg.message_id)
         return
 
     caption = f"{sender_name}:\n{text}" if text else f"{sender_name}:"
+    if unavailable:
+        labels = {"image": "图片", "video": "视频", "record": "语音", "file": "文件"}
+        notices = [
+            f"[{labels[kind]}无法转发：缺少可用的 HTTP(S) 下载地址]"
+            for kind in dict.fromkeys(unavailable)
+        ]
+        caption += "\n" + "\n".join(notices)
     reply_parameters = None
     if msg.reply_message_id is not None:
         reply_mapping = await sql.get_tg_message(msg.group_id, msg.reply_message_id)
@@ -177,21 +286,19 @@ async def forward_onebot_to_telegram(
             )
 
     if not media:
-        if unavailable_videos and not text:
-            caption = f"{sender_name}:\n[视频无法转发：缺少下载地址]"
-        if not msg.tg_message_ids:
-            sent = await bot.send_message(
-                chat_id=group_id,
-                text=caption,
-                reply_parameters=reply_parameters,
-            )
-            msg.tg_message_ids.append(sent.message_id)
+        await _send_text_chunks(msg, bot, group_id, caption, reply_parameters)
     elif (
-        not msg.tg_message_ids
-        and msg.next_media_index == 0
+        msg.next_media_index == 0
         and 2 <= len(media) <= 10
         and all(kind == "image" for kind, _, _ in media)
     ):
+        media_caption, media_reply = await _prepare_media_caption(
+            msg,
+            bot,
+            group_id,
+            caption,
+            reply_parameters,
+        )
         contents: list[MediaFile] = []
         try:
             for kind, url, filename in media:
@@ -213,8 +320,8 @@ async def forward_onebot_to_telegram(
                     group_id,
                     media,
                     contents,
-                    caption,
-                    reply_parameters,
+                    media_caption,
+                    media_reply,
                 )
             elif as_photos:
                 album = [
@@ -225,7 +332,7 @@ async def forward_onebot_to_telegram(
                             attach=True,
                             read_file_handle=False,
                         ),
-                        caption=caption if index == 0 else None,
+                        caption=media_caption if index == 0 else None,
                         show_caption_above_media=index == 0,
                     )
                     for index, (content, (_, _, filename)) in enumerate(
@@ -241,7 +348,7 @@ async def forward_onebot_to_telegram(
                             attach=True,
                             read_file_handle=False,
                         ),
-                        caption=caption if index == len(contents) - 1 else None,
+                        caption=media_caption if index == len(contents) - 1 else None,
                     )
                     for index, (content, (_, _, filename)) in enumerate(
                         zip(contents, media, strict=True)
@@ -251,7 +358,7 @@ async def forward_onebot_to_telegram(
                 sent_messages = await bot.send_media_group(
                     chat_id=group_id,
                     media=album,
-                    reply_parameters=reply_parameters,
+                    reply_parameters=media_reply,
                 )
                 msg.tg_message_ids.extend(sent.message_id for sent in sent_messages)
                 msg.next_media_index = len(media)
@@ -259,6 +366,13 @@ async def forward_onebot_to_telegram(
             for content in contents:
                 content.close()
     else:
+        media_caption, media_reply = await _prepare_media_caption(
+            msg,
+            bot,
+            group_id,
+            caption,
+            reply_parameters,
+        )
         for index in range(msg.next_media_index, len(media)):
             kind, url, filename = media[index]
             content = await download_media(
@@ -268,66 +382,70 @@ async def forward_onebot_to_telegram(
                 kind=kind,
             )
             try:
+                if kind == "record":
+                    await normalize_onebot_record(content)
                 is_gif = kind == "image" and _is_gif(content)
                 upload_filename = (
                     f"{Path(filename).stem or 'animation'}.gif" if is_gif else filename
                 )
+                if kind == "record":
+                    upload_filename = content.filename
                 upload = InputFile(
                     content.file,
                     filename=upload_filename,
                     read_file_handle=False,
                 )
-                media_caption = caption if not msg.tg_message_ids else None
-                media_reply = reply_parameters if not msg.tg_message_ids else None
-                if is_gif:
+                item_caption = media_caption if not msg.tg_message_ids else None
+                item_reply = media_reply if not msg.tg_message_ids else None
+                if kind == "record":
+                    sent = await bot.send_voice(
+                        chat_id=group_id,
+                        voice=upload,
+                        caption=item_caption,
+                        reply_parameters=item_reply,
+                    )
+                elif is_gif:
                     sent = await bot.send_animation(
                         chat_id=group_id,
                         animation=upload,
-                        caption=media_caption,
+                        caption=item_caption,
                         show_caption_above_media=True,
-                        reply_parameters=media_reply,
+                        reply_parameters=item_reply,
                     )
                 elif kind == "image" and content.size <= PHOTO_LIMIT:
                     sent = await bot.send_photo(
                         chat_id=group_id,
                         photo=upload,
-                        caption=media_caption,
+                        caption=item_caption,
                         show_caption_above_media=True,
-                        reply_parameters=media_reply,
+                        reply_parameters=item_reply,
                     )
                 elif kind == "video" and _is_mp4(content):
                     sent = await bot.send_video(
                         chat_id=group_id,
                         video=upload,
-                        caption=media_caption,
+                        caption=item_caption,
                         show_caption_above_media=True,
                         supports_streaming=True,
-                        reply_parameters=media_reply,
+                        reply_parameters=item_reply,
                     )
                 else:
                     sent = await bot.send_document(
                         chat_id=group_id,
                         document=upload,
-                        caption=media_caption,
-                        reply_parameters=media_reply,
+                        caption=item_caption,
+                        reply_parameters=item_reply,
                     )
                 msg.tg_message_ids.append(sent.message_id)
                 msg.next_media_index = index + 1
             finally:
                 content.close()
-        if not msg.tg_message_ids:
-            sent = await bot.send_message(
-                chat_id=group_id,
-                text=f"{caption}\n[视频无法转发：缺少下载地址]",
-                reply_parameters=reply_parameters,
-            )
-            msg.tg_message_ids.append(sent.message_id)
 
     # 远端发送已经完成，本地映射失败不能触发 Telegram 重发。
     try:
         await sql.set_message_mapping(
             q_group_id=msg.group_id,
-            q_message_id=msg.message_id,
+            q_message_ids=(msg.message_id,),
             tg_chat_id=group_id,
             tg_message_ids=tuple(msg.tg_message_ids),
             q_user_id=msg.user_id,
@@ -342,7 +460,7 @@ async def _send_downloaded_media_individually(
     group_id: int,
     media: list[tuple[str, str, str]],
     contents: list[MediaFile],
-    caption: str,
+    caption: str | None,
     reply_parameters: ReplyParameters | None,
 ) -> None:
     """按原顺序发送不能组成 Telegram 媒体组的已下载媒体。"""
@@ -385,6 +503,58 @@ async def _send_downloaded_media_individually(
         msg.next_media_index = index + 1
 
 
+async def _prepare_media_caption(
+    msg: OneBotMessage,
+    bot: ExtBot[None],
+    group_id: int,
+    caption: str,
+    reply_parameters: ReplyParameters | None,
+) -> tuple[str | None, ReplyParameters | None]:
+    if _utf16_length(caption) <= TELEGRAM_CAPTION_LIMIT:
+        return caption, reply_parameters
+    await _send_text_chunks(msg, bot, group_id, caption, reply_parameters)
+    return None, None
+
+
+async def _send_text_chunks(
+    msg: OneBotMessage,
+    bot: ExtBot[None],
+    group_id: int,
+    text: str,
+    reply_parameters: ReplyParameters | None,
+) -> None:
+    chunks = _split_telegram_text(text)
+    for index in range(msg.next_text_chunk_index, len(chunks)):
+        sent = await bot.send_message(
+            chat_id=group_id,
+            text=chunks[index],
+            reply_parameters=reply_parameters if index == 0 else None,
+        )
+        msg.tg_message_ids.append(sent.message_id)
+        msg.next_text_chunk_index = index + 1
+
+
+def _split_telegram_text(text: str) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    units = 0
+    for character in text:
+        character_units = _utf16_length(character)
+        if current and units + character_units > TELEGRAM_TEXT_LIMIT:
+            chunks.append("".join(current))
+            current = []
+            units = 0
+        current.append(character)
+        units += character_units
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
+def _utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
 async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) -> None:
     """将 Telegram 文本或图片通过 OneBot action 发送到绑定的 Onebot 群。"""
     group_id = await sql.get_q_group(msg.group_id)
@@ -398,16 +568,19 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
         return
 
     batches: list[list[dict[str, Any]]]
-    text = f"{msg.sender_name}:\n"
+    text = f"{msg.sender_name}:"
     if msg.forwarded_from is not None:
-        text += f"转发自: {msg.forwarded_from}\n"
-    text += msg.text or ""
+        text += f"\n转发自: {msg.forwarded_from}"
+    if msg.text:
+        text += f"\n{msg.text}"
     if msg.media:
         if msg.media_ids is None:
             msg.media_ids = media_cache.set_media_batch(
-                tuple(attachment.content for attachment in msg.media)
+                tuple(attachment.content for attachment in msg.media),
+                pinned=True,
             )
-        text_segment = {
+            msg.media_cache_pinned = True
+        text_segment: dict[str, str | dict[str, str]] = {
             "type": "text",
             "data": {"text": text},
         }
@@ -418,8 +591,8 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
             if attachment.kind == "file":
                 data["name"] = attachment.content.filename
             media_segments.append({"type": attachment.kind, "data": data})
-        if any(attachment.kind == "video" for attachment in msg.media):
-            # SnowLuma 不发送与 video 位于同一 action 的 text，必须拆成两条消息。
+        if any(attachment.kind in {"record", "video"} for attachment in msg.media):
+            # SnowLuma 的 video 和 record 都会丢失同 action 的文本
             batches = [[text_segment], media_segments]
         else:
             batches = [[text_segment, *media_segments]]
@@ -433,7 +606,7 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
         if reply_mapping is not None:
             batches[0].insert(
                 0,
-                {"type": "reply", "data": {"id": str(reply_mapping.q_message_id)}},
+                {"type": "reply", "data": {"id": str(reply_mapping.q_message_ids[-1])}},
             )
 
     for index in range(msg.next_onebot_batch, len(batches)):
@@ -452,7 +625,7 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
     try:
         await sql.set_message_mapping(
             q_group_id=group_id,
-            q_message_id=msg.q_message_ids[-1],
+            q_message_ids=tuple(msg.q_message_ids),
             tg_chat_id=msg.group_id,
             tg_message_ids=msg.message_ids,
             tg_user_id=msg.user_id,
@@ -466,7 +639,10 @@ async def finalize_telegram_message(msg: TelegramMessage) -> None:
     if msg.queue_bytes:
         await media_queue_budget.release(msg.queue_bytes)
         msg.queue_bytes = 0
-    if msg.media_ids is None:
+    if msg.media_ids is not None and msg.media_cache_pinned:
+        media_cache.release_media_batch(msg.media_ids)
+        msg.media_cache_pinned = False
+    elif msg.media_ids is None:
         for attachment in msg.media:
             attachment.content.close()
 
@@ -641,7 +817,7 @@ def onebot_forward_task(
     """创建目标为 Telegram、失败三次后仅通知 Onebot 的通用任务。"""
     return SendTask(
         target=SendTarget.TELEGRAM,
-        send=partial(forward_onebot_to_telegram, msg, bot, client),
+        send=partial(forward_onebot_to_telegram, msg, bot, client, gateway),
         failure_action=_telegram_failure_action,
         max_attempts=MAX_SEND_ATTEMPTS,
         on_failed=partial(_notify_onebot_telegram_failure, msg, gateway),

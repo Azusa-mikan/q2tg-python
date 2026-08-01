@@ -60,7 +60,9 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         mapping = await self.database.get_q_message(-456, 200)
         self.assertIsNotNone(mapping)
         assert mapping is not None
-        self.assertEqual(mapping.q_message_id, 100)
+        self.assertEqual(mapping.q_message_ids, (99, 100))
+        first_mapping = await self.database.get_tg_message(123, 99)
+        self.assertIsNotNone(first_mapping)
 
         media_cache.close()
         self.assertEqual(media_item_budget.used, initial_items)
@@ -92,7 +94,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        self.assertEqual(unavailable, 0)
+        self.assertEqual(unavailable, [])
         self.assertEqual(media[0][1], "https://example.test/download/video?id=123")
         self.assertEqual(media[0][2], "clip.mp4")
         self.assertEqual(media[1][1], "https://example.test/download/image?id=456")
@@ -202,6 +204,10 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             gateway.send_group_message.await_args_list[1].kwargs["message"],
             gateway.send_group_message.await_args_list[2].kwargs["message"],
         )
+
+        mapping = await self.database.get_tg_message(123, 101)
+        assert mapping is not None
+        self.assertEqual(mapping.q_message_ids, (101, 102))
 
     async def test_onebot_mp4_uses_send_video_and_saves_mapping(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -663,7 +669,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
 
         bot.send_message.assert_awaited_once_with(
             chat_id=-456,
-            text="OneBot User:\n[视频无法转发：缺少下载地址]",
+            text="OneBot User:\n[视频无法转发：缺少可用的 HTTP(S) 下载地址]",
             reply_parameters=None,
         )
         mapping = await self.database.get_tg_message(123, 103)

@@ -25,13 +25,16 @@ class OneBotMessage:
     # 重复发送已经成功的前序媒体。
     tg_message_ids: list[int] = field(default_factory=list)
     next_media_index: int = 0
+    next_text_chunk_index: int = 0
+    # 群成员名称查询结果跨发送重试复用；None 表示查询失败。
+    mention_names: dict[int, str | None] = field(default_factory=dict)
 
 
 @dataclass(slots=True, kw_only=True)
 class TelegramMedia:
     """Telegram 入站媒体及其对应的 OneBot 消息段类型。"""
 
-    kind: Literal["file", "image", "video"]
+    kind: Literal["file", "image", "record", "video"]
     content: MediaFile
     processing: Literal["none", "video", "sticker_static", "sticker_video"] = "none"
 
@@ -49,6 +52,7 @@ class TelegramMessage:
     reply_message_id: int | None = None
     media: tuple[TelegramMedia, ...] = ()
     media_ids: tuple[str, ...] | None = None
+    media_cache_pinned: bool = False
     queue_bytes: int = 0
     q_message_ids: list[int] = field(default_factory=list)
     next_onebot_batch: int = 0

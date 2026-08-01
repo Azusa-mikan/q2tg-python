@@ -15,6 +15,8 @@ dependencies = [
     "httpx[socks]>=0.28.1",
     # 将 Telegram 静态 WebP 贴纸和 TGS 缩略图转换为透明 PNG。
     "pillow>=12.3.0",
+    # 解码 QQ/微信使用的腾讯 SILK v3 语音。
+    "pilk>=0.2.4",
     # .env 应用配置的字段类型校验与加载。
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.2",
@@ -24,4 +26,12 @@ dependencies = [
     "uvicorn>=0.41.0",
     # Uvicorn 的 WebSocket 协议实现依赖。
     "websockets>=17.0",
+]
+
+[dependency-groups]
+dev = [
+    # Python 静态类型检查。
+    "pyright>=1.1.411",
+    # Python lint 与代码规范检查。
+    "ruff>=0.16.1",
 ]

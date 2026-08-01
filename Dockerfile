@@ -12,6 +12,9 @@ ENV UV_LINK_MODE=copy \
 
 WORKDIR /app
 
+# pilk 包含原生 SILK 编解码扩展，仅在依赖构建阶段需要 C 工具链。
+RUN apk add --no-cache build-base
+
 # 先只复制依赖清单，源码变化不会使依赖层缓存失效。
 COPY pyproject.toml uv.lock ./
 
@@ -32,6 +35,7 @@ RUN apk add --no-cache ca-certificates ffmpeg \
     && ffprobe -version >/dev/null 2>&1 \
     && ffmpeg -hide_banner -encoders 2>&1 | grep -q '[[:space:]]libx264[[:space:]]' \
     && ffmpeg -hide_banner -encoders 2>&1 | grep -q '[[:space:]]gif[[:space:]]' \
+    && ffmpeg -hide_banner -encoders 2>&1 | grep -q '[[:space:]]libopus[[:space:]]' \
     && ffmpeg -hide_banner -decoders 2>&1 | grep -q '[[:space:]]hevc[[:space:]]' \
     && ffmpeg -hide_banner -decoders 2>&1 | grep -q '[[:space:]]vp9[[:space:]]' \
     && addgroup -S -g 10001 q2tg \

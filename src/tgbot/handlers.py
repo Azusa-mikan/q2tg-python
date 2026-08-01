@@ -219,7 +219,7 @@ class TGhandlers:
 
     @command("id_show")
     async def id_show(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """查询或设置无名 Onebot 用户是否在 Telegram 显示数字 ID。"""
+        """查询或设置 Onebot 用户及 @ 对象是否在 Telegram 显示数字 ID。"""
         msg = update.effective_message
         chat = update.effective_chat
         user = update.effective_user
@@ -243,14 +243,14 @@ class TGhandlers:
             if enabled is None:
                 await msg.reply_text("当前群聊尚未绑定 OneBot 群")
                 return
-            await msg.reply_text(f"无名 Onebot 用户 ID 显示已{'开启' if enabled else '关闭'}")
+            await msg.reply_text(f"Onebot 用户及 @ 对象 ID 显示已{'开启' if enabled else '关闭'}")
             return
 
         enabled = args[0].lower() == "on"
         if not await sql.set_id_show_enabled(chat.id, enabled):
             await msg.reply_text("当前群聊尚未绑定 OneBot 群")
             return
-        await msg.reply_text(f"无名 Onebot 用户 ID 显示已{'开启' if enabled else '关闭'}")
+        await msg.reply_text(f"Onebot 用户及 @ 对象 ID 显示已{'开启' if enabled else '关闭'}")
 
     @command("undo")
     async def undo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -279,11 +279,15 @@ class TGhandlers:
             await msg.reply_text("非群聊管理员只能撤回自己的消息")
             return
 
-        try:
-            # 目标消息由群主发送、机器人仅为管理员时，Onebot 可能返回成功，
-            # 但群聊权限仍会阻止实际撤回。
-            await q_gateway.delete_message(mapping.q_message_id)
-        except RuntimeError:
+        failures = 0
+        for message_id in mapping.q_message_ids:
+            try:
+                # 目标消息由群主发送、机器人仅为管理员时，Onebot 可能返回成功，
+                # 但群聊权限仍会阻止实际撤回。
+                await q_gateway.delete_message(message_id)
+            except RuntimeError:
+                failures += 1
+        if failures:
             await msg.reply_text("OneBot 撤回失败，消息可能超过两分钟或机器人权限不足")
             return
         for index in range(0, len(mapping.tg_message_ids), 100):
@@ -318,10 +322,16 @@ class TGhandlers:
 
     @message(
         filters.ChatType.GROUPS
-        & (filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.Sticker.ALL)
+        & (
+            filters.PHOTO
+            | filters.VIDEO
+            | filters.VOICE
+            | filters.Document.ALL
+            | filters.Sticker.ALL
+        )
     )
     async def receive_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """处理单个图片、视频或文件，或按 media_group_id 收集媒体组。"""
+        """处理单个图片、视频、语音或文件，或按 media_group_id 收集媒体组。"""
         if not (msg := update.message):
             return
         if msg.media_group_id is None:
@@ -361,9 +371,9 @@ class TGhandlers:
         """下载一组 Telegram 媒体，取得资源预算后放入消息队列。
 
          Telegram 的 Message.photo 是同一张照片的多个尺寸，不是多张照片；这里
-        选择最后一个最大尺寸。video 和 document 分别映射为 Onebot 的 video 和
-        file。函数成功入队后，MediaFile 所有权交给转发任务；此前的异常或取消
-        路径由本函数清理。
+        选择最后一个最大尺寸。video、voice 和 document 分别映射为 Onebot 的
+        video、record 和 file。函数成功入队后，MediaFile 所有权交给转发任务；
+        此前的异常或取消路径由本函数清理。
         """
         # Update 到达次序不一定稳定，按 message_id 恢复用户发送的相册顺序。
         messages.sort(key=lambda message: message.message_id)
@@ -409,6 +419,8 @@ class TGhandlers:
                     )
             elif message.video is not None:
                 sources.append(("video", message.video, TELEGRAM_DOWNLOAD_LIMIT, "video"))
+            elif (voice := getattr(message, "voice", None)) is not None:
+                sources.append(("record", voice, TELEGRAM_DOWNLOAD_LIMIT, "none"))
             elif message.photo:
                 sources.append(("image", message.photo[-1], TELEGRAM_DOWNLOAD_LIMIT, "none"))
             elif (document := message.document) is not None:
@@ -450,12 +462,14 @@ class TGhandlers:
                 if not filename:
                     filename = {
                         "image": "image.jpg",
+                        "record": "voice.ogg",
                         "video": "video.mp4",
                     }.get(kind, "file")
                 media_type = getattr(source, "mime_type", None)
                 if not media_type:
                     media_type = {
                         "image": "image/jpeg",
+                        "record": "audio/ogg",
                         "video": "video/mp4",
                     }.get(kind, "application/octet-stream")
                 content = MediaFile.create_reserved(filename=filename, media_type=media_type)

@@ -88,6 +88,24 @@ class QGateway:
         """调用 OneBot delete_msg 撤回指定消息。"""
         await self._call_action("delete_msg", {"message_id": message_id})
 
+    async def get_group_member_info(
+        self,
+        group_id: int,
+        user_id: int,
+    ) -> dict[str, Any]:
+        """查询群成员资料；使用 OneBot 实现的默认缓存策略。"""
+        response = await self._call_action(
+            "get_group_member_info",
+            {
+                "group_id": group_id,
+                "user_id": user_id,
+            },
+        )
+        data = response.get("data")
+        if not isinstance(data, dict):
+            raise TypeError(f"OneBot 群成员响应缺少 data: {response!r}")
+        return data
+
     async def _call_action(
         self,
         action: str,

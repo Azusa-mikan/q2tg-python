@@ -20,7 +20,7 @@ Q2TG-Python 是一个基于 OneBot 11 与 Telegram Bot API 的双向群消息桥
 ## 功能
 
 - OneBot 群与 Telegram 群一对一绑定
-- 双向转发文本、图片、图片组、GIF、文件、视频和贴纸
+- 双向转发文本、图片、图片组、GIF、文件、视频、语音和贴纸
 - 保留消息回复关系与来源引用
 - 映射两侧消息并支持双向撤回
 - HEVC、VP9、WebP 等媒体兼容转换
@@ -269,7 +269,7 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 | `/bind <OneBot 群号>` | 配置的 Bot 管理员 | 绑定当前 Telegram 群与 OneBot 群 |
 | `/unbind` | 配置的 Bot 管理员 | 解除当前群的绑定 |
 | `/forward [on\|off]` | Telegram 群管理员 | 查询或设置 Telegram 到 OneBot 的转发状态 |
-| `/id_show [on\|off]` | Telegram 群管理员 | 查询或设置无名 OneBot 用户的数字 ID 显示 |
+| `/id_show [on\|off]` | Telegram 群管理员 | 查询或设置 OneBot 用户及 @ 对象的数字 ID 显示 |
 | `/undo` | 按实现权限检查 | 回复目标消息后撤回两侧对应消息 |
 
 绑定示例：
@@ -286,7 +286,7 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 - Docker 部署应持久化 `/app/data`
 - 消息映射默认保留 30 天
 - 单个下载媒体的大小上限为 20 MB
-- 视频和贴纸转换依赖 ffmpeg、ffprobe 与 Pillow
+- 视频、语音和贴纸转换依赖 ffmpeg、ffprobe、Pillow 与 pilk
 - 删除容器前未持久化 `/app/data` 会丢失群绑定和消息映射
 
 ## 常见问题
@@ -344,7 +344,7 @@ Q2TG_TGBOT_PROXY_URL=
 `8000`。`Q2TG_ONEBOT_MEDIA_URL` 必须是 OneBot 侧能够访问的本服务 HTTP(S) 地址。
 进程中的同名环境变量优先于 `.env`。
 
-安装锁定依赖：
+安装锁定依赖和开发工具（包括 Pyright 与 Ruff）：
 
 ```bash
 uv sync --locked
@@ -377,13 +377,11 @@ uv run --locked python -W error::ResourceWarning -m unittest discover -s tests
 运行静态检查：
 
 ```bash
-uv run --locked --with pyright pyright main.py src tests
-uv run --locked --with ruff ruff check .
+uv run --locked pyright main.py src tests
+uv run --locked ruff check .
 uv run --locked python -m compileall -q main.py src tests
 ```
 
 ## 许可证
 
-本项目使用 [q2tg-python Source-Available Non-Commercial Share-Alike License 1.1](LICENSE)。
-这不是 OSI 定义的开源许可证，并且禁止未经授权的商业使用。使用、修改或分发本项目
-前，请阅读完整许可证条款。
+本项目基于 [GNU General Public License v3.0 or later](LICENSE) 开源。

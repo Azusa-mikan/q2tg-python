@@ -8,7 +8,12 @@ import httpx
 from telegram.ext import ExtBot
 
 from src.bus import MessageBus
-from src.forwarding import onebot_forward_task, telegram_forward_task
+from src.forwarding import (
+    finalize_telegram_message,
+    onebot_forward_task,
+    telegram_forward_task,
+)
+from src.media import MediaFile, media_cache
 from src.messages import (
     FailureAction,
     MediaTooLargeError,
@@ -22,6 +27,29 @@ from src.qbot import QGateway
 
 
 class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncTearDown(self) -> None:
+        media_cache.close()
+
+    async def test_finalize_releases_media_cache_pin_idempotently(self) -> None:
+        media = await MediaFile.create(filename="voice.ogg", media_type="audio/ogg")
+        media.write(b"voice")
+        media_id = media_cache.set_media_batch((media,), pinned=True)[0]
+        message = TelegramMessage(
+            message_ids=(1,),
+            group_id=-456,
+            user_id=2,
+            sender_name="TG User",
+            text=None,
+            media_ids=(media_id,),
+            media_cache_pinned=True,
+        )
+
+        await finalize_telegram_message(message)
+        await finalize_telegram_message(message)
+
+        self.assertFalse(message.media_cache_pinned)
+        self.assertEqual(media_cache._media[media_id].pins, 0)
+
     async def test_telegram_target_exhaustion_only_notifies_onebot(self) -> None:
         bus = MessageBus()
         bot = cast(ExtBot[None], SimpleNamespace())
