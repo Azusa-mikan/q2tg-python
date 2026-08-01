@@ -40,7 +40,7 @@ from src.notice import (
 )
 from src.processing import ProcessingTask
 from src.sql import sql
-from src.sticker import static_sticker_to_png, video_sticker_to_gif
+from src.sticker import static_sticker_to_png, tgs_sticker_to_gif, video_sticker_to_gif
 from src.video import normalize_video_for_onebot
 
 if TYPE_CHECKING:
@@ -766,16 +766,17 @@ async def prepare_telegram_forward(
                 attachment.content,
                 size_limit=TELEGRAM_VIDEO_LIMIT,
             )
+        elif attachment.processing == "sticker_tgs":
+            await tgs_sticker_to_gif(attachment.content)
         elif attachment.processing == "sticker_video":
             await video_sticker_to_gif(
                 attachment.content,
                 size_limit=TELEGRAM_VIDEO_LIMIT,
             )
     normalized_size = sum(attachment.content.size for attachment in msg.media)
-    if normalized_size > msg.queue_bytes:
-        raise RuntimeError("媒体规范化结果超过预留队列预算")
-    await media_queue_budget.release(msg.queue_bytes - normalized_size)
-    msg.queue_bytes = normalized_size
+    if normalized_size < msg.queue_bytes:
+        await media_queue_budget.release(msg.queue_bytes - normalized_size)
+        msg.queue_bytes = normalized_size
     await message_bus.put(telegram_forward_task(msg, gateway, bot))
 
 

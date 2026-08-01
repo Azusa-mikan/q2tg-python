@@ -288,7 +288,9 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 - Docker 部署应持久化 `/app/data`
 - 消息映射默认保留 30 天
 - 单个下载媒体的大小上限为 20 MB
-- 视频、语音和贴纸转换依赖 ffmpeg、ffprobe、Pillow 与 pilk
+- 视频、语音和贴纸转换依赖 ffmpeg、ffprobe、Pillow、pilk 与
+  [lottie-converter](https://github.com/ed-asriyan/lottie-converter)
+- TGS 输入仍受 Telegram Bot API 下载上限限制；转换后的 GIF 不设置额外大小上限
 - 删除容器前未持久化 `/app/data` 会丢失群绑定和消息映射
 
 ## 常见问题
@@ -345,6 +347,19 @@ Q2TG_TGBOT_PROXY_URL=
 `Q2TG_APP_PORT` 是本地 HTTP 服务和 OneBot 反向 WebSocket 的监听端口，默认值为
 `8000`。`Q2TG_ONEBOT_MEDIA_URL` 必须是 OneBot 侧能够访问的本服务 HTTP(S) 地址。
 进程中的同名环境变量优先于 `.env`。
+
+本地运行时，TGS 动态贴纸转换要求已安装 Docker，Docker daemon 正在运行，并且当前用户
+有权执行 `docker run`。项目会自动调用固定版本的 `lottie-converter` 镜像，不使用
+`sudo`。项目自身的 Docker 镜像内置转换工具，不会在容器中再次启动 Docker。
+
+使用 `docker-compose-debug.yaml` 启动本地构建的镜像时，容器以 UID `10001` 读写项目的
+`data` 目录。可通过 ACL 在不改变目录现有所有者的情况下授予读写权限（这么做是让本地运行可以继续读写 data 目录），并让新建内容继承该权限：
+
+```bash
+sudo setfacl -R -m u:10001:rwX -m d:u:10001:rwX ./data
+```
+
+如果系统没有 `setfacl`，Debian/Ubuntu 可通过 `sudo apt install acl` 安装。
 
 安装锁定依赖和开发工具（包括 Pyright 与 Ruff）：
 

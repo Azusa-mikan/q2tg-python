@@ -22,8 +22,10 @@ Telegram 媒体组最多支持 10 项、合计 100 MB；其中每项仍受 20 MB
 
 - 贴纸
   - Telegram 静态贴纸作为图片发送，视频贴纸转为 GIF 发送
+  - Telegram TGS 动态贴纸转为 GIF 发送
+    - 本地运行时通过 Docker 转换；项目容器内直接使用内置转换工具
+    - 转换后的 GIF 不设置额外大小上限
   - OneBot 侧以图片段收到的 GIF 会作为 Telegram 动画发送
-  - TGS 动态贴纸仅发送静态缩略图
 - 撤回
   - 仅支持在 Telegram 回复目标消息后使用 `/undo` 发起
   - 命令会撤回 Telegram 和 OneBot 两侧的对应消息

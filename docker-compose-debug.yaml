@@ -1,0 +1,15 @@
+services:
+  q2tg-python:
+    image: q2tg-python:debug
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: q2tg-python
+    restart: unless-stopped
+    init: true
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data

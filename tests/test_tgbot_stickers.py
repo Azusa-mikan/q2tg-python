@@ -89,26 +89,23 @@ class TelegramStickerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(media_item_budget.used, initial_items)
         self.assertEqual(media_queue_budget.used, initial_bytes)
 
-    async def test_tgs_sticker_downloads_only_thumbnail(self) -> None:
-        thumbnail = SimpleNamespace(
-            file_size=100,
-            get_file=AsyncMock(
-                return_value=SimpleNamespace(
-                    file_size=100,
-                    file_path="https://example.test/thumbnail",
-                )
-            ),
-        )
+    async def test_tgs_sticker_downloads_original_for_gif_conversion(self) -> None:
         sticker = SimpleNamespace(
             is_animated=True,
             is_video=False,
-            thumbnail=thumbnail,
-            get_file=AsyncMock(),
+            file_size=100,
+            file_name="sticker.tgs",
+            mime_type="application/x-tgsticker",
+            get_file=AsyncMock(
+                return_value=SimpleNamespace(
+                    file_size=100,
+                    file_path="https://example.test/sticker.tgs",
+                )
+            ),
         )
         task, message = await self._enqueue_sticker(sticker, self._webp())
-        sticker.get_file.assert_not_awaited()
-        thumbnail.get_file.assert_awaited_once()
-        self.assertEqual(message.media[0].processing, "sticker_static")
+        sticker.get_file.assert_awaited_once()
+        self.assertEqual(message.media[0].processing, "sticker_tgs")
         await task.cleanup()
 
     async def test_video_sticker_is_scheduled_for_gif_conversion(self) -> None:

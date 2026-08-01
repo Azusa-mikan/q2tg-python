@@ -389,14 +389,12 @@ class TGhandlers:
         for message in messages:
             if (sticker := getattr(message, "sticker", None)) is not None:
                 if sticker.is_animated:
-                    if sticker.thumbnail is None:
-                        raise ValueError("Telegram 动态贴纸缺少可用缩略图，无法转发")
                     sources.append(
                         (
                             "image",
-                            sticker.thumbnail,
+                            sticker,
                             TELEGRAM_DOWNLOAD_LIMIT,
-                            "sticker_static",
+                            "sticker_tgs",
                         )
                     )
                 elif sticker.is_video:

@@ -11,4 +11,4 @@ fi
 chown q2tg:q2tg /app/data
 chmod u+rwx /app/data
 
-exec su-exec q2tg "$@"
+exec gosu q2tg "$@"

@@ -13,7 +13,7 @@ dependencies = [
     "fastapi>=0.140.1",
     # 两个平台图片和视频的流式下载客户端。
     "httpx[socks]>=0.28.1",
-    # 将 Telegram 静态 WebP 贴纸和 TGS 缩略图转换为透明 PNG。
+    # 将 Telegram 静态 WebP 贴纸转换为透明 PNG。
     "pillow>=12.3.0",
     # 解码 QQ/微信使用的腾讯 SILK v3 语音。
     "pilk>=0.2.4",

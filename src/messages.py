@@ -36,7 +36,13 @@ class TelegramMedia:
 
     kind: Literal["file", "image", "record", "video"]
     content: MediaFile
-    processing: Literal["none", "video", "sticker_static", "sticker_video"] = "none"
+    processing: Literal[
+        "none",
+        "video",
+        "sticker_static",
+        "sticker_tgs",
+        "sticker_video",
+    ] = "none"
 
 
 @dataclass(slots=True, kw_only=True)
