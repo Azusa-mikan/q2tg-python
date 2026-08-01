@@ -55,7 +55,10 @@ class StickerConversionTests(unittest.IsolatedAsyncioTestCase):
                 "-f",
                 "lavfi",
                 "-i",
-                "color=c=red@0.5:s=64x64:d=0.2,format=rgba",
+                (
+                    "color=c=black@0.0:s=64x64:d=0.2,format=rgba,"
+                    "drawbox=x=16:y=16:w=32:h=32:color=red@1:t=fill:replace=1"
+                ),
                 "-an",
                 "-c:v",
                 "libvpx-vp9",
@@ -85,6 +88,10 @@ class StickerConversionTests(unittest.IsolatedAsyncioTestCase):
             media.rewind()
             with Image.open(media.file) as converted:
                 self.assertEqual(converted.format, "GIF")
+                rgba = converted.convert("RGBA")
+                alpha = rgba.getchannel("A")
+                self.assertEqual(alpha.getpixel((0, 0)), 0)
+                self.assertEqual(alpha.getpixel((256, 256)), 255)
             info.assert_called_once_with("视频贴纸转码完成，耗时 %.2f 秒", 1.25)
         finally:
             media.close()

@@ -41,7 +41,7 @@ RUN apt-get update \
     && ffmpeg -hide_banner -encoders 2>&1 | grep -q '[[:space:]]gif[[:space:]]' \
     && ffmpeg -hide_banner -encoders 2>&1 | grep -q '[[:space:]]libopus[[:space:]]' \
     && ffmpeg -hide_banner -decoders 2>&1 | grep -q '[[:space:]]hevc[[:space:]]' \
-    && ffmpeg -hide_banner -decoders 2>&1 | grep -q '[[:space:]]vp9[[:space:]]' \
+    && ffmpeg -hide_banner -decoders 2>&1 | grep -q '[[:space:]]libvpx-vp9[[:space:]]' \
     && groupadd --gid 10001 q2tg \
     && useradd --uid 10001 --gid q2tg --no-create-home --shell /usr/sbin/nologin q2tg \
     && mkdir -p /app/data /app/tmp \

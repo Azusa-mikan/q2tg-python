@@ -6,9 +6,11 @@ if [ ! -d /app/data ] || [ -L /app/data ]; then
     exit 1
 fi
 
-# Compose 可能以 root:root 创建 bind mount 源目录。只修正挂载点本身，
-# 不递归修改用户放入数据目录的其他内容。
-chown q2tg:q2tg /app/data
+# Compose 可能以 root:root 创建 bind mount 源目录。已有 ACL 能让容器用户写入时
+# 保留宿主机所有者，避免破坏本地运行；否则只修正挂载点本身。
+if ! gosu q2tg test -w /app/data; then
+    chown q2tg:q2tg /app/data
+fi
 chmod u+rwx /app/data
 
 exec gosu q2tg "$@"

@@ -353,13 +353,28 @@ Q2TG_TGBOT_PROXY_URL=
 `sudo`。项目自身的 Docker 镜像内置转换工具，不会在容器中再次启动 Docker。
 
 使用 `docker-compose-debug.yaml` 启动本地构建的镜像时，容器以 UID `10001` 读写项目的
-`data` 目录。可通过 ACL 在不改变目录现有所有者的情况下授予读写权限（这么做是让本地运行可以继续读写 data 目录），并让新建内容继承该权限：
+`data` 目录。本地进程与 debug 容器需要轮流使用同一个数据目录时，先停止两边的 q2tg
+实例，再恢复本地用户所有权，并通过 ACL 授予容器用户对现有及以后新建内容的读写权限：
 
 ```bash
-sudo setfacl -R -m u:10001:rwX -m d:u:10001:rwX ./data
+sudo chown -R "$(id -u):$(id -g)" ./data
+sudo chmod -R u+rwX ./data
+sudo setfacl -R -m u:10001:rwX ./data
+sudo setfacl -m d:u:10001:rwX ./data
 ```
 
-如果系统没有 `setfacl`，Debian/Ubuntu 可通过 `sudo apt install acl` 安装。
+不要同时运行本地和容器中的 q2tg 实例。SQLite WAL 模式要求进程不仅能够修改
+`q2tg.db`，还能够在 `data` 目录创建和修改 `q2tg.db-wal`、`q2tg.db-shm`。权限修复后
+必须重启应用，使其重新打开数据库连接。可使用以下命令检查数据库及辅助文件权限：
+
+```bash
+stat -c '%U:%G %A %n' ./data ./data/q2tg.db*
+getfacl ./data ./data/q2tg.db
+```
+
+如果只在本地运行，不需要设置 UID `10001` 的 ACL。如果只在 Docker 中运行，也不需要
+恢复为本地用户所有。系统没有 `setfacl` 时，Debian/Ubuntu 可通过
+`sudo apt install acl` 安装。
 
 安装锁定依赖和开发工具（包括 Pyright 与 Ruff）：
 

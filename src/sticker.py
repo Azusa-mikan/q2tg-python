@@ -66,6 +66,8 @@ async def video_sticker_to_gif(media: MediaFile, *, size_limit: int) -> None:
                 "-loglevel",
                 "error",
                 "-y",
+                "-c:v",
+                "libvpx-vp9",
                 "-i",
                 f"/proc/self/fd/{input_fd}",
                 "-filter_complex",
