@@ -36,8 +36,9 @@ RUN apk add --no-cache ca-certificates ffmpeg \
     && ffmpeg -hide_banner -decoders 2>&1 | grep -q '[[:space:]]vp9[[:space:]]' \
     && addgroup -S -g 10001 q2tg \
     && adduser -S -D -H -u 10001 -G q2tg q2tg \
-    && mkdir -p /app/data \
-    && chown q2tg:q2tg /app/data
+    && apk add --no-cache su-exec \
+    && mkdir -p /app/data /app/tmp \
+    && chown q2tg:q2tg /app/data /app/tmp
 
 WORKDIR /app
 
@@ -45,13 +46,13 @@ COPY --from=builder --chown=q2tg:q2tg /app/.venv /app/.venv
 COPY --chown=q2tg:q2tg pyproject.toml uv.lock ./
 COPY --chown=q2tg:q2tg main.py ./
 COPY --chown=q2tg:q2tg src ./src
-
-USER q2tg
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 VOLUME ["/app/data"]
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('Q2TG_APP_PORT', '8000') + '/healthz', timeout=3).close()"]
+    CMD ["su-exec", "q2tg", "python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('Q2TG_APP_PORT', '8000') + '/healthz', timeout=3).close()"]
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["uv", "run", "--locked", "--no-sync", "python", "main.py"]

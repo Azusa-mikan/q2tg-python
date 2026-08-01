@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from secrets import token_urlsafe
 from tempfile import SpooledTemporaryFile
 
+from src.paths import ensure_temp_dir
+
 SPOOL_MEMORY_LIMIT = 1 * 1024 * 1024
 # 落盘后的 SpooledTemporaryFile 会持续占用一个文件描述符。这里限制的不只是
 # Python 对象数量，也是在给系统的 open files 上限留出余量。
@@ -129,7 +131,11 @@ class MediaFile:
         # 普通创建路径自行申请一个全局文件名额。
         await media_item_budget.acquire()
         try:
-            file = SpooledTemporaryFile(max_size=SPOOL_MEMORY_LIMIT, mode="w+b")  # noqa: SIM115
+            file = SpooledTemporaryFile(  # noqa: SIM115
+                max_size=SPOOL_MEMORY_LIMIT,
+                mode="w+b",
+                dir=str(ensure_temp_dir()),
+            )
         except BaseException:
             media_item_budget.release()
             raise
@@ -149,7 +155,11 @@ class MediaFile:
     ) -> "MediaFile":
         # 调用方已批量取得 ItemBudget；这里不能再次 acquire。
         return cls(
-            SpooledTemporaryFile(max_size=SPOOL_MEMORY_LIMIT, mode="w+b"),
+            SpooledTemporaryFile(
+                max_size=SPOOL_MEMORY_LIMIT,
+                mode="w+b",
+                dir=str(ensure_temp_dir()),
+            ),
             filename=filename,
             media_type=media_type,
             owns_item_slot=True,

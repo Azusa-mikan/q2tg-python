@@ -15,5 +15,8 @@ wheels/
 # 数据
 data/
 
+# 运行时临时媒体
+tmp/
+
 # 临时脚本
 scripts/

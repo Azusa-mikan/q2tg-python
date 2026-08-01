@@ -8,6 +8,7 @@ from tempfile import NamedTemporaryFile
 
 from src.log import baselog
 from src.media import STREAM_CHUNK_SIZE, MediaFile
+from src.paths import ensure_temp_dir
 
 PROBE_TIMEOUT = 30
 TRANSCODE_TIMEOUT = 300
@@ -26,7 +27,11 @@ async def normalize_video_for_onebot(media: MediaFile, *, size_limit: int) -> No
         return
 
     started_at = time.monotonic()
-    with NamedTemporaryFile(suffix=".mp4", delete=False) as output:
+    with NamedTemporaryFile(
+        suffix=".mp4",
+        delete=False,
+        dir=str(ensure_temp_dir()),
+    ) as output:
         output_path = Path(output.name)
     try:
         input_fd = media.file.fileno()

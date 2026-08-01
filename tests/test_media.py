@@ -1,6 +1,9 @@
 import asyncio
 import unittest
+from pathlib import Path
+from tempfile import SpooledTemporaryFile, TemporaryDirectory
 from typing import Any, cast
+from unittest.mock import patch
 
 from telegram import InputFile
 
@@ -8,6 +11,28 @@ from src.media import SPOOL_MEMORY_LIMIT, ByteBudget, MediaFile, media_item_budg
 
 
 class MediaFileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_create_uses_project_temp_directory(self) -> None:
+        with TemporaryDirectory() as directory:
+            temp_dir = Path(directory) / "tmp"
+            with (
+                patch("src.paths.TEMP_DIR", temp_dir),
+                patch(
+                    "src.media.SpooledTemporaryFile",
+                    wraps=SpooledTemporaryFile,
+                ) as spool,
+            ):
+                media = await MediaFile.create()
+                try:
+                    media.write(b"x" * (SPOOL_MEMORY_LIMIT + 1))
+                    self.assertTrue(temp_dir.is_dir())
+                    spool.assert_called_once_with(
+                        max_size=SPOOL_MEMORY_LIMIT,
+                        mode="w+b",
+                        dir=str(temp_dir),
+                    )
+                finally:
+                    media.close()
+
     async def test_spool_rolls_over_after_memory_limit(self) -> None:
         initial_items = media_item_budget.used
         media = await MediaFile.create(filename="image.jpg", media_type="image/jpeg")

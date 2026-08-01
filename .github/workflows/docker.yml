@@ -2,6 +2,11 @@ name: Build and publish Docker image
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 可选版本标签，例如 v1.0.0；留空时只发布 latest 和提交 SHA
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -17,6 +22,31 @@ jobs:
 
       - name: Set image name
         run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Validate version
+        if: inputs.version != ''
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "Invalid Docker version tag: $VERSION" >&2
+            exit 1
+          fi
+
+      - name: Set image tags
+        id: tags
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          {
+            echo 'value<<EOF'
+            echo "${IMAGE_NAME}:latest"
+            echo "${IMAGE_NAME}:sha-${GITHUB_SHA}"
+            if [[ -n "$VERSION" ]]; then
+              echo "${IMAGE_NAME}:${VERSION}"
+            fi
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -38,9 +68,7 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:latest
-            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          tags: ${{ steps.tags.outputs.value }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: mode=max

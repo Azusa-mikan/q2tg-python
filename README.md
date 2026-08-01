@@ -50,6 +50,29 @@ Q2TG-Python ─── SQLite / 媒体处理 ─── Telegram Bot API
 - 部署：Docker Engine、Docker Compose 插件、Telegram Bot token
 - 开发：Python 3.13+、[uv](https://docs.astral.sh/uv/)、ffmpeg、ffprobe
 
+### 资源配置
+
+Q2TG-Python 独立运行（OneBot 由其他主机或服务提供）时：
+
+| 配置 | CPU | 物理内存 | Swap | 可用存储 |
+| --- | --- | --- | --- | --- |
+| 最低配置 | 1 核 | 2 GB | 建议 1 GB | 5 GB |
+| 推荐配置 | 2 核 | 4 GB | 1–2 GB | 10 GB |
+
+最低配置适合个人使用、消息量较低且媒体转码不频繁的场景；长期运行、群消息较多或经常
+转发视频与贴纸时，建议使用推荐配置。上述可用存储已经包含 SQLite 数据、Docker 镜像、
+日志以及项目临时媒体所需空间，无需再为临时目录单独叠加容量。
+
+如果使用仓库提供的 Compose，在同一台主机运行 Q2TG-Python、SnowLuma 和 QQ，整机推荐
+配置为：
+
+| CPU | 物理内存 | Swap | 可用存储 |
+| --- | --- | --- | --- |
+| 4 核 | 8 GB | 2–4 GB | 30 GB |
+
+“可用存储”指拉取镜像和启动服务前磁盘的实际剩余空间，不是磁盘标称总容量。大量群文件、
+图片、视频或长期保留 QQ 数据时，应按实际数据增长预留更多空间。
+
 仓库提供的 Compose 已包含 [SnowLuma](https://github.com/SnowLuma/SnowLuma)；使用其他
 OneBot 11 实现时，需要自行保证反向 WebSocket 和媒体地址的网络可达性。
 

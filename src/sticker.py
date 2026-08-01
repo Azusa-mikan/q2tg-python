@@ -9,6 +9,7 @@ from PIL import Image, UnidentifiedImageError
 
 from src.log import baselog
 from src.media import STREAM_CHUNK_SIZE, MediaFile
+from src.paths import ensure_temp_dir
 
 STICKER_TRANSCODE_TIMEOUT = 120
 
@@ -16,7 +17,11 @@ STICKER_TRANSCODE_TIMEOUT = 120
 async def static_sticker_to_png(media: MediaFile, *, size_limit: int) -> None:
     """使用 Pillow 将静态贴纸或 TGS 缩略图转换为透明 PNG。"""
     started_at = time.monotonic()
-    with NamedTemporaryFile(suffix=".png", delete=False) as output:
+    with NamedTemporaryFile(
+        suffix=".png",
+        delete=False,
+        dir=str(ensure_temp_dir()),
+    ) as output:
         output_path = Path(output.name)
     try:
         try:
@@ -36,7 +41,11 @@ async def static_sticker_to_png(media: MediaFile, *, size_limit: int) -> None:
 async def video_sticker_to_gif(media: MediaFile, *, size_limit: int) -> None:
     """使用 ffmpeg 将 WebM/VP9 视频贴纸转换为循环透明 GIF。"""
     started_at = time.monotonic()
-    with NamedTemporaryFile(suffix=".gif", delete=False) as output:
+    with NamedTemporaryFile(
+        suffix=".gif",
+        delete=False,
+        dir=str(ensure_temp_dir()),
+    ) as output:
         output_path = Path(output.name)
     try:
         input_fd = media.file.fileno()
