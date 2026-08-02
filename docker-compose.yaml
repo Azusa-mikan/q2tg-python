@@ -7,6 +7,7 @@ services:
     networks:
       - q2tg-net
     environment:
+      Q2TG_DATABASE_URL: "${Q2TG_DATABASE_URL:-sqlite:////app/data/q2tg.db}"
       Q2TG_ONEBOT_TOKEN: "${Q2TG_ONEBOT_TOKEN:?请设置 Q2TG_ONEBOT_TOKEN}"
       Q2TG_ONEBOT_MEDIA_URL: "http://q2tg-python:8000"
       Q2TG_ONEBOT_PROXY_URL: "${Q2TG_ONEBOT_PROXY_URL:-}"

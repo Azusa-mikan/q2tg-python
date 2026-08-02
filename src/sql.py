@@ -1,27 +1,53 @@
-"""使用 SQLite 保存群绑定和长期消息映射。"""
+"""使用 SQLAlchemy Async 保存群绑定和长期消息映射。"""
 
 import asyncio
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-import aiosqlite
+import sqlalchemy as sa
+from sqlalchemy import event
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
+from src.config import config
+from src.database_schema import (
+    group_mappings,
+    message_mappings,
+    onebot_message_mappings,
+    telegram_message_mappings,
+)
 from src.sql_migrations import migrate_database
 
 MESSAGE_RETENTION = 30 * 24 * 60 * 60
-
 DATABASE_PATH = Path(__file__).parents[1] / "data" / "q2tg.db"
+
+ASYNC_DRIVERS = {
+    "sqlite": "sqlite+aiosqlite",
+    "mysql": "mysql+asyncmy",
+    "postgresql": "postgresql+asyncpg",
+}
+
+
+def async_database_url(value: str | Path) -> URL:
+    """把公开的标准数据库 URL 转换为对应 SQLAlchemy 异步驱动 URL。"""
+    if isinstance(value, Path):
+        value.parent.mkdir(parents=True, exist_ok=True)
+        url = URL.create("sqlite", database=str(value))
+    else:
+        url = make_url(value)
+    driver = ASYNC_DRIVERS.get(url.drivername)
+    if driver is None:
+        raise ValueError(f"不支持的数据库类型: {url.drivername}")
+    return url.set(drivername=driver)
 
 
 @dataclass(frozen=True, slots=True)
 class MessageMapping:
-    """一条 OneBot 消息与一组 Telegram 消息之间的长期关系。
-
-    Telegram 相册包含多个 message_id，因此使用元组表示一对多；普通文本和
-    单图是只有一个元素的特例。群 ID 是键的一部分，避免不同群中的消息 ID
-    发生碰撞。
-    """
+    """一条 OneBot 消息与一组 Telegram 消息之间的长期关系。"""
 
     q_group_id: int
     q_message_ids: tuple[int, ...]
@@ -33,126 +59,118 @@ class MessageMapping:
 
 
 class Sql:
-    """通过 aiosqlite 持久化群绑定和 30 天消息映射。"""
+    """通过 SQLAlchemy Async 持久化群绑定和 30 天消息映射。"""
 
-    def __init__(self, database_path: Path = DATABASE_PATH) -> None:
-        self._database_path = database_path
-        self._db: aiosqlite.Connection | None = None
-        # aiosqlite 会串行执行单条语句，但不会自动保护由多条语句组成的事务。
-        self._db_lock = asyncio.Lock()
+    def __init__(self, database: str | Path | None = None) -> None:
+        self._url = async_database_url(database or config.database_url)
+        self._engine: AsyncEngine | None = None
+        # SQLite 需要串行化 BEGIN IMMEDIATE；也避免单实例内冲突写入无谓重试。
+        self._write_lock = asyncio.Lock()
 
     async def bind_group(self, q_group_id: int, tg_chat_id: int) -> None:
         """建立严格一对一的群绑定，已有冲突时拒绝静默覆盖。"""
         if q_group_id <= 0:
             raise ValueError("OneBot 群号必须是正整数")
 
-        db = self._require_db()
-        async with self._db_lock:
-            cursor = await db.execute(
-                "SELECT q_group_id, tg_chat_id FROM group_mappings "
-                "WHERE q_group_id = ? OR tg_chat_id = ?",
-                (q_group_id, tg_chat_id),
-            )
-            rows = await cursor.fetchall()
-            await cursor.close()
-            current_tg = next((row[1] for row in rows if row[0] == q_group_id), None)
-            current_q = next((row[0] for row in rows if row[1] == tg_chat_id), None)
+        async with self._write_lock:
+            try:
+                async with self._transaction() as connection:
+                    await connection.execute(
+                        sa.insert(group_mappings).values(
+                            q_group_id=q_group_id,
+                            tg_chat_id=tg_chat_id,
+                        )
+                    )
+                return
+            except IntegrityError:
+                pass
+
+            async with self._connection() as connection:
+                rows = (
+                    await connection.execute(
+                        sa.select(
+                            group_mappings.c.q_group_id,
+                            group_mappings.c.tg_chat_id,
+                        ).where(
+                            sa.or_(
+                                group_mappings.c.q_group_id == q_group_id,
+                                group_mappings.c.tg_chat_id == tg_chat_id,
+                            )
+                        )
+                    )
+                ).all()
+            current_tg = next((row.tg_chat_id for row in rows if row.q_group_id == q_group_id), None)
+            current_q = next((row.q_group_id for row in rows if row.tg_chat_id == tg_chat_id), None)
             if current_tg == tg_chat_id and current_q == q_group_id:
-                # 完全相同的重复绑定视为幂等成功。
                 return
             if current_tg is not None:
                 raise ValueError(f"OneBot 群 {q_group_id} 已绑定其他 Telegram 群")
             if current_q is not None:
                 raise ValueError(f"当前 Telegram 群已绑定 OneBot 群 {current_q}")
-
-            await db.execute(
-                "INSERT INTO group_mappings (q_group_id, tg_chat_id) VALUES (?, ?)",
-                (q_group_id, tg_chat_id),
-            )
-            await db.commit()
+            raise RuntimeError("群绑定并发写入失败，请重试")
 
     async def unbind_tg_group(self, tg_chat_id: int) -> int | None:
         """按 Telegram 群解除绑定，并返回此前绑定的 OneBot 群号。"""
-        db = self._require_db()
-        async with self._db_lock:
-            cursor = await db.execute(
-                "DELETE FROM group_mappings WHERE tg_chat_id = ? RETURNING q_group_id",
-                (tg_chat_id,),
+        async with self._write_lock, self._transaction(immediate=True) as connection:
+            statement = sa.select(group_mappings.c.q_group_id).where(
+                group_mappings.c.tg_chat_id == tg_chat_id
             )
-            row = await cursor.fetchone()
-            await cursor.close()
-            await db.commit()
-        return row[0] if row is not None else None
+            if self._url.get_backend_name() != "sqlite":
+                statement = statement.with_for_update()
+            q_group_id = (await connection.execute(statement)).scalar_one_or_none()
+            if q_group_id is not None:
+                await connection.execute(
+                    sa.delete(group_mappings).where(
+                        group_mappings.c.tg_chat_id == tg_chat_id
+                    )
+                )
+            return q_group_id
 
     async def get_tg_group(self, q_group_id: int) -> int | None:
-        """查询 OneBot 群绑定的 Telegram chat_id。"""
-        db = self._require_db()
-        cursor = await db.execute(
-            "SELECT tg_chat_id FROM group_mappings WHERE q_group_id = ?",
-            (q_group_id,),
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
-        return row[0] if row is not None else None
+        async with self._connection() as connection:
+            return (
+                await connection.execute(
+                    sa.select(group_mappings.c.tg_chat_id).where(
+                        group_mappings.c.q_group_id == q_group_id
+                    )
+                )
+            ).scalar_one_or_none()
 
     async def get_q_group(self, tg_chat_id: int) -> int | None:
-        """查询 Telegram 群绑定的 OneBot group_id。"""
-        db = self._require_db()
-        cursor = await db.execute(
-            "SELECT q_group_id FROM group_mappings WHERE tg_chat_id = ?",
-            (tg_chat_id,),
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
-        return row[0] if row is not None else None
+        async with self._connection() as connection:
+            return (
+                await connection.execute(
+                    sa.select(group_mappings.c.q_group_id).where(
+                        group_mappings.c.tg_chat_id == tg_chat_id
+                    )
+                )
+            ).scalar_one_or_none()
 
     async def set_tg_forward_enabled(self, tg_chat_id: int, enabled: bool) -> bool:
-        """设置当前 Telegram 群到 OneBot 的转发开关，返回群是否已绑定。"""
-        db = self._require_db()
-        async with self._db_lock:
-            cursor = await db.execute(
-                "UPDATE group_mappings SET tg_forward_enabled = ? WHERE tg_chat_id = ?",
-                (int(enabled), tg_chat_id),
-            )
-            changed = cursor.rowcount > 0
-            await cursor.close()
-            await db.commit()
-        return changed
+        return await self._set_group_flag(
+            tg_chat_id,
+            group_mappings.c.tg_forward_enabled,
+            enabled,
+        )
 
     async def get_tg_forward_enabled(self, tg_chat_id: int) -> bool | None:
-        """查询 Telegram 到 OneBot 的转发状态；未绑定群返回 None。"""
-        db = self._require_db()
-        cursor = await db.execute(
-            "SELECT tg_forward_enabled FROM group_mappings WHERE tg_chat_id = ?",
-            (tg_chat_id,),
+        return await self._get_group_flag(
+            tg_chat_id,
+            group_mappings.c.tg_forward_enabled,
         )
-        row = await cursor.fetchone()
-        await cursor.close()
-        return bool(row[0]) if row is not None else None
 
     async def set_id_show_enabled(self, tg_chat_id: int, enabled: bool) -> bool:
-        """设置无名 Onebot 用户是否显示数字 ID，返回群是否已绑定。"""
-        db = self._require_db()
-        async with self._db_lock:
-            cursor = await db.execute(
-                "UPDATE group_mappings SET id_show_enabled = ? WHERE tg_chat_id = ?",
-                (int(enabled), tg_chat_id),
-            )
-            changed = cursor.rowcount > 0
-            await cursor.close()
-            await db.commit()
-            return changed
+        return await self._set_group_flag(
+            tg_chat_id,
+            group_mappings.c.id_show_enabled,
+            enabled,
+        )
 
     async def get_id_show_enabled(self, tg_chat_id: int) -> bool | None:
-        """查询无名用户 ID 显示设置；已绑定群默认开启，未绑定群返回 None。"""
-        db = self._require_db()
-        cursor = await db.execute(
-            "SELECT id_show_enabled FROM group_mappings WHERE tg_chat_id = ?",
-            (tg_chat_id,),
+        return await self._get_group_flag(
+            tg_chat_id,
+            group_mappings.c.id_show_enabled,
         )
-        row = await cursor.fetchone()
-        await cursor.close()
-        return bool(row[0]) if row is not None else None
 
     async def set_message_mapping(
         self,
@@ -173,236 +191,239 @@ class Sql:
         if len(set(tg_message_ids)) != len(tg_message_ids):
             raise ValueError("Telegram 消息 ID 不能重复")
 
-        db = self._require_db()
-        expires_at = time.time() + MESSAGE_RETENTION
-        q_placeholders = ",".join("?" for _ in q_message_ids)
-        tg_placeholders = ",".join("?" for _ in tg_message_ids)
+        async with self._write_lock, self._transaction(immediate=True) as connection:
+            q_conflicts = sa.select(onebot_message_mappings.c.mapping_id).where(
+                onebot_message_mappings.c.q_group_id == q_group_id,
+                onebot_message_mappings.c.q_message_id.in_(q_message_ids),
+            )
+            tg_conflicts = sa.select(telegram_message_mappings.c.mapping_id).where(
+                telegram_message_mappings.c.tg_chat_id == tg_chat_id,
+                telegram_message_mappings.c.tg_message_id.in_(tg_message_ids),
+            )
+            conflicts = set((await connection.execute(q_conflicts.union(tg_conflicts))).scalars())
+            if conflicts:
+                await connection.execute(
+                    sa.delete(message_mappings).where(message_mappings.c.id.in_(conflicts))
+                )
 
-        # 任意一侧 ID 已存在时删除整条旧映射，避免留下相互矛盾的回复关系。
-        async with self._db_lock:
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                cursor = await db.execute(
-                    f"""
-                    SELECT mapping_id
-                    FROM onebot_message_mappings
-                    WHERE q_group_id = ? AND q_message_id IN ({q_placeholders})
-                    UNION
-                    SELECT mapping_id
-                    FROM telegram_message_mappings
-                    WHERE tg_chat_id = ? AND tg_message_id IN ({tg_placeholders})
-                    """,
-                    (q_group_id, *q_message_ids, tg_chat_id, *tg_message_ids),
+            result = await connection.execute(
+                sa.insert(message_mappings).values(
+                    q_group_id=q_group_id,
+                    q_message_id=q_message_ids[-1],
+                    tg_chat_id=tg_chat_id,
+                    q_user_id=q_user_id,
+                    tg_user_id=tg_user_id,
+                    expires_at=time.time() + MESSAGE_RETENTION,
                 )
-                conflicting_ids = [row[0] for row in await cursor.fetchall()]
-                await cursor.close()
-                if conflicting_ids:
-                    conflict_placeholders = ",".join("?" for _ in conflicting_ids)
-                    await db.execute(
-                        f"DELETE FROM message_mappings WHERE id IN ({conflict_placeholders})",
-                        conflicting_ids,
-                    )
-
-                cursor = await db.execute(
-                    """
-                    INSERT INTO message_mappings (
-                        q_group_id, q_message_id, tg_chat_id, q_user_id, tg_user_id, expires_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                (
-                    q_group_id,
-                    q_message_ids[-1],
-                    tg_chat_id,
-                    q_user_id,
-                    tg_user_id,
-                    expires_at,
-                ),
-                )
-                mapping_id = cursor.lastrowid
-                await cursor.close()
-                if mapping_id is None:
-                    raise RuntimeError("SQLite 未返回消息映射 ID")
-                await db.executemany(
-                    """
-                    INSERT INTO onebot_message_mappings (
-                        mapping_id, q_group_id, q_message_id, position
-                    ) VALUES (?, ?, ?, ?)
-                    """,
-                    (
-                        (mapping_id, q_group_id, message_id, position)
-                        for position, message_id in enumerate(q_message_ids)
-                    ),
-                )
-                await db.executemany(
-                    """
-                    INSERT INTO telegram_message_mappings (mapping_id, tg_chat_id, tg_message_id)
-                    VALUES (?, ?, ?)
-                    """,
-                    ((mapping_id, tg_chat_id, message_id) for message_id in tg_message_ids),
-                )
-                await db.commit()
-            except BaseException:
-                await db.rollback()
-                raise
+            )
+            primary_key = result.inserted_primary_key
+            if primary_key is None:
+                raise RuntimeError("数据库未返回消息映射 ID")
+            mapping_id = primary_key[0]
+            await connection.execute(
+                sa.insert(onebot_message_mappings),
+                [
+                    {
+                        "mapping_id": mapping_id,
+                        "q_group_id": q_group_id,
+                        "q_message_id": message_id,
+                        "position": position,
+                    }
+                    for position, message_id in enumerate(q_message_ids)
+                ],
+            )
+            await connection.execute(
+                sa.insert(telegram_message_mappings),
+                [
+                    {
+                        "mapping_id": mapping_id,
+                        "tg_chat_id": tg_chat_id,
+                        "tg_message_id": message_id,
+                    }
+                    for message_id in tg_message_ids
+                ],
+            )
 
     async def get_tg_message(
         self,
         q_group_id: int,
         q_message_id: int,
     ) -> MessageMapping | None:
-        """通过 OneBot 群和消息 ID 查询对应的 Telegram 消息组。"""
-        db = self._require_db()
-        async with self._db_lock:
-            cursor = await db.execute(
-                """
-                SELECT m.id, m.q_group_id, m.q_message_id, m.tg_chat_id,
-                       q_user_id, tg_user_id, expires_at
-                FROM message_mappings AS m
-                JOIN onebot_message_mappings AS q ON q.mapping_id = m.id
-                WHERE q.q_group_id = ? AND q.q_message_id = ? AND expires_at > ?
-                """,
-                (q_group_id, q_message_id, time.time()),
+        statement = (
+            sa.select(message_mappings)
+            .join(
+                onebot_message_mappings,
+                onebot_message_mappings.c.mapping_id == message_mappings.c.id,
             )
-            row = await cursor.fetchone()
-            await cursor.close()
-            return await self._mapping_from_row(row)
+            .where(
+                onebot_message_mappings.c.q_group_id == q_group_id,
+                onebot_message_mappings.c.q_message_id == q_message_id,
+                message_mappings.c.expires_at > time.time(),
+            )
+        )
+        async with self._connection() as connection:
+            row = (await connection.execute(statement)).mappings().one_or_none()
+            return await self._mapping_from_row(connection, row)
 
     async def get_q_message(
         self,
         tg_chat_id: int,
         tg_message_id: int,
     ) -> MessageMapping | None:
-        """通过相册中的任意 Telegram 消息 ID 查询 OneBot 消息。"""
-        db = self._require_db()
-        async with self._db_lock:
-            cursor = await db.execute(
-                """
-                SELECT m.id, m.q_group_id, m.q_message_id, m.tg_chat_id,
-                       m.q_user_id, m.tg_user_id, m.expires_at
-                FROM message_mappings AS m
-                JOIN telegram_message_mappings AS t ON t.mapping_id = m.id
-                WHERE t.tg_chat_id = ? AND t.tg_message_id = ? AND m.expires_at > ?
-                """,
-                (tg_chat_id, tg_message_id, time.time()),
+        statement = (
+            sa.select(message_mappings)
+            .join(
+                telegram_message_mappings,
+                telegram_message_mappings.c.mapping_id == message_mappings.c.id,
             )
-            row = await cursor.fetchone()
-            await cursor.close()
-            return await self._mapping_from_row(row)
+            .where(
+                telegram_message_mappings.c.tg_chat_id == tg_chat_id,
+                telegram_message_mappings.c.tg_message_id == tg_message_id,
+                message_mappings.c.expires_at > time.time(),
+            )
+        )
+        async with self._connection() as connection:
+            row = (await connection.execute(statement)).mappings().one_or_none()
+            return await self._mapping_from_row(connection, row)
 
     async def purge_expired(self) -> None:
-        """删除已过期的消息映射；反向索引由外键级联删除。"""
-        db = self._require_db()
-        async with self._db_lock:
-            await db.execute("DELETE FROM message_mappings WHERE expires_at <= ?", (time.time(),))
-            await db.commit()
+        async with self._write_lock, self._transaction() as connection:
+            await connection.execute(
+                sa.delete(message_mappings).where(
+                    message_mappings.c.expires_at <= time.time()
+                )
+            )
 
     async def load(self) -> None:
-        """连接 SQLite，并创建群绑定和消息映射所需的数据表。"""
-        self._database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(self._database_path)
+        """自动迁移 schema，并创建异步连接池。"""
+        if self._engine is not None:
+            raise RuntimeError("消息映射数据库已经加载")
+        if self._url.get_backend_name() == "sqlite" and self._url.database:
+            Path(self._url.database).parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(migrate_database, self._url)
+        engine = create_async_engine(self._url, pool_pre_ping=True)
+        if self._url.get_backend_name() == "sqlite":
+            event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
+        self._engine = engine
         try:
-            cursor = await self._db.execute("PRAGMA journal_mode = WAL")
-            journal_mode = await cursor.fetchone()
-            await cursor.close()
-            if journal_mode is None or journal_mode[0].lower() != "wal":
-                raise RuntimeError("SQLite 无法启用 WAL 模式")
-            await self._db.execute("PRAGMA synchronous = NORMAL")
-            await self._db.execute("PRAGMA foreign_keys = ON")
-            await self._db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS group_mappings (
-                    q_group_id INTEGER PRIMARY KEY,
-                    tg_chat_id INTEGER NOT NULL UNIQUE,
-                    tg_forward_enabled INTEGER NOT NULL DEFAULT 1
-                        CHECK (tg_forward_enabled IN (0, 1)),
-                    id_show_enabled INTEGER NOT NULL DEFAULT 1
-                        CHECK (id_show_enabled IN (0, 1))
-                );
-
-                CREATE TABLE IF NOT EXISTS message_mappings (
-                    id INTEGER PRIMARY KEY,
-                    q_group_id INTEGER NOT NULL,
-                    q_message_id INTEGER NOT NULL,
-                    tg_chat_id INTEGER NOT NULL,
-                    q_user_id INTEGER,
-                    tg_user_id INTEGER,
-                    expires_at REAL NOT NULL,
-                    UNIQUE (q_group_id, q_message_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS telegram_message_mappings (
-                    mapping_id INTEGER NOT NULL REFERENCES message_mappings(id) ON DELETE CASCADE,
-                    tg_chat_id INTEGER NOT NULL,
-                    tg_message_id INTEGER NOT NULL,
-                    PRIMARY KEY (tg_chat_id, tg_message_id)
-                );
-
-                CREATE INDEX IF NOT EXISTS message_mappings_expires_at
-                ON message_mappings(expires_at);
-                """
-            )
-            await migrate_database(self._db)
-            await self._db.commit()
+            if self._url.get_backend_name() == "sqlite":
+                async with engine.connect() as connection:
+                    await connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+                    await connection.exec_driver_sql("PRAGMA synchronous = NORMAL")
+                    mode = (await connection.exec_driver_sql("PRAGMA journal_mode = WAL")).scalar()
+                    if str(mode).lower() != "wal":
+                        raise RuntimeError("SQLite 无法启用 WAL 模式")
         except BaseException:
             await self.close()
             raise
 
     async def close(self) -> None:
-        """关闭 SQLite 连接。"""
-        if self._db is None:
+        if self._engine is None:
             return
-        await self._db.close()
-        self._db = None
+        engine = self._engine
+        self._engine = None
+        await engine.dispose()
 
-    def _require_db(self) -> aiosqlite.Connection:
-        if self._db is None:
-            raise RuntimeError("消息映射数据库尚未加载")
-        return self._db
+    async def _set_group_flag(
+        self,
+        tg_chat_id: int,
+        column: sa.Column[bool],
+        enabled: bool,
+    ) -> bool:
+        async with self._write_lock, self._transaction() as connection:
+            result = await connection.execute(
+                sa.update(group_mappings)
+                .where(group_mappings.c.tg_chat_id == tg_chat_id)
+                .values({column.key: enabled})
+            )
+            return bool(result.rowcount)
 
-    async def _mapping_from_row(self, row: aiosqlite.Row | tuple | None) -> MessageMapping | None:
+    async def _get_group_flag(
+        self,
+        tg_chat_id: int,
+        column: sa.Column[bool],
+    ) -> bool | None:
+        async with self._connection() as connection:
+            return (
+                await connection.execute(
+                    sa.select(column).where(group_mappings.c.tg_chat_id == tg_chat_id)
+                )
+            ).scalar_one_or_none()
+
+    async def _mapping_from_row(
+        self,
+        connection: AsyncConnection,
+        row: sa.RowMapping | None,
+    ) -> MessageMapping | None:
         if row is None:
             return None
-        (
-            mapping_id,
-            q_group_id,
-            q_message_id,
-            tg_chat_id,
-            q_user_id,
-            tg_user_id,
-            expires_at,
-        ) = row
-        db = self._require_db()
-        cursor = await db.execute(
-            """
-            SELECT q_message_id
-            FROM onebot_message_mappings
-            WHERE mapping_id = ?
-            ORDER BY position
-            """,
-            (mapping_id,),
+        mapping_id = row["id"]
+        q_message_ids = tuple(
+            (
+                await connection.execute(
+                    sa.select(onebot_message_mappings.c.q_message_id)
+                    .where(onebot_message_mappings.c.mapping_id == mapping_id)
+                    .order_by(onebot_message_mappings.c.position)
+                )
+            ).scalars()
         )
-        q_message_ids = tuple(item[0] for item in await cursor.fetchall())
-        await cursor.close()
-        cursor = await db.execute(
-            """
-            SELECT tg_message_id
-            FROM telegram_message_mappings
-            WHERE mapping_id = ?
-            ORDER BY tg_message_id
-            """,
-            (mapping_id,),
+        tg_message_ids = tuple(
+            (
+                await connection.execute(
+                    sa.select(telegram_message_mappings.c.tg_message_id)
+                    .where(telegram_message_mappings.c.mapping_id == mapping_id)
+                    .order_by(telegram_message_mappings.c.tg_message_id)
+                )
+            ).scalars()
         )
-        tg_message_ids = tuple(item[0] for item in await cursor.fetchall())
-        await cursor.close()
         return MessageMapping(
-            q_group_id=q_group_id,
-            q_message_ids=q_message_ids or (q_message_id,),
-            tg_chat_id=tg_chat_id,
+            q_group_id=row["q_group_id"],
+            q_message_ids=q_message_ids or (row["q_message_id"],),
+            tg_chat_id=row["tg_chat_id"],
             tg_message_ids=tg_message_ids,
-            q_user_id=q_user_id,
-            tg_user_id=tg_user_id,
-            expires_at=expires_at,
+            q_user_id=row["q_user_id"],
+            tg_user_id=row["tg_user_id"],
+            expires_at=row["expires_at"],
         )
 
-# 所有入口和转发函数共享同一个 SQLite 管理实例。
+    @asynccontextmanager
+    async def _connection(self) -> AsyncIterator[AsyncConnection]:
+        engine = self._require_engine()
+        async with engine.connect() as connection:
+            yield connection
+
+    @asynccontextmanager
+    async def _transaction(self, *, immediate: bool = False) -> AsyncIterator[AsyncConnection]:
+        engine = self._require_engine()
+        async with engine.connect() as connection:
+            if immediate and self._url.get_backend_name() == "sqlite":
+                await connection.exec_driver_sql("BEGIN IMMEDIATE")
+                try:
+                    yield connection
+                except BaseException:
+                    await connection.rollback()
+                    raise
+                else:
+                    await connection.commit()
+            else:
+                async with connection.begin():
+                    yield connection
+
+    def _require_engine(self) -> AsyncEngine:
+        if self._engine is None:
+            raise RuntimeError("消息映射数据库尚未加载")
+        return self._engine
+
+
 sql = Sql()
+
+
+def _configure_sqlite_connection(dbapi_connection, connection_record) -> None:
+    """为连接池中的每条 SQLite 连接启用一致的约束和耐久性设置。"""
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys = ON")
+        cursor.execute("PRAGMA synchronous = NORMAL")
+        cursor.execute("PRAGMA busy_timeout = 5000")
+    finally:
+        cursor.close()

@@ -4,29 +4,23 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from src.sql import Sql
 
 
 class SqlMessageTests(unittest.IsolatedAsyncioTestCase):
     async def test_initialization_failure_closes_connection(self) -> None:
-        connection = SimpleNamespace(
-            execute=AsyncMock(side_effect=RuntimeError("pragma failed")),
-            close=AsyncMock(),
-        )
-        with (
-            TemporaryDirectory() as directory,
-            patch("src.sql.aiosqlite.connect", new_callable=AsyncMock, return_value=connection),
+        with TemporaryDirectory() as directory, patch(
+            "src.sql.migrate_database",
+            side_effect=RuntimeError("migration failed"),
         ):
             cache = Sql(Path(directory) / "cache.sqlite3")
-            with self.assertRaisesRegex(RuntimeError, "pragma failed"):
+            with self.assertRaisesRegex(RuntimeError, "migration failed"):
                 await cache.load()
 
-        connection.close.assert_awaited_once_with()
         with self.assertRaisesRegex(RuntimeError, "尚未加载"):
-            cache._require_db()
+            await cache.get_tg_group(123)
 
     async def test_message_mapping_persists_and_supports_both_directions(self) -> None:
         with TemporaryDirectory() as directory:
@@ -87,6 +81,14 @@ class SqlMessageTests(unittest.IsolatedAsyncioTestCase):
             with closing(sqlite3.connect(path)) as connection:
                 connection.executescript(
                     """
+                    CREATE TABLE group_mappings (
+                        q_group_id INTEGER PRIMARY KEY,
+                        tg_chat_id INTEGER NOT NULL UNIQUE,
+                        tg_forward_enabled INTEGER NOT NULL DEFAULT 1
+                            CHECK (tg_forward_enabled IN (0, 1)),
+                        id_show_enabled INTEGER NOT NULL DEFAULT 1
+                            CHECK (id_show_enabled IN (0, 1))
+                    );
                     CREATE TABLE message_mappings (
                         id INTEGER PRIMARY KEY,
                         q_group_id INTEGER NOT NULL,
@@ -115,11 +117,11 @@ class SqlMessageTests(unittest.IsolatedAsyncioTestCase):
                 assert mapping is not None
                 self.assertEqual(mapping.q_message_ids, (456,))
                 self.assertEqual(mapping.tg_message_ids, (10,))
-                cursor = await cache._require_db().execute("PRAGMA user_version")
-                self.assertEqual(await cursor.fetchone(), (1,))
-                await cursor.close()
             finally:
                 await cache.close()
+
+            with closing(sqlite3.connect(path)) as connection:
+                self.assertEqual(connection.execute("PRAGMA user_version").fetchone(), (1,))
 
 
 if __name__ == "__main__":

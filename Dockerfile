@@ -59,6 +59,8 @@ COPY --from=lottie-converter --chmod=755 \
     /usr/bin/gifski \
     /usr/local/bin/
 COPY --chown=q2tg:q2tg pyproject.toml uv.lock ./
+COPY --chown=q2tg:q2tg alembic.ini ./
+COPY --chown=q2tg:q2tg alembic ./alembic
 COPY --chown=q2tg:q2tg main.py ./
 COPY --chown=q2tg:q2tg src ./src
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

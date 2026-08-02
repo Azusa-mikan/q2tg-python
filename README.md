@@ -24,9 +24,11 @@ Q2TG-Python 是一个基于 OneBot 11 与 Telegram Bot API 的双向群消息桥
 - 保留消息回复关系与来源引用
 - 映射两侧消息并支持双向撤回
 - HEVC、VP9、WebP 等媒体兼容转换
-- SQLite 持久化群绑定、群设置和消息映射
+- 根据文件签名识别 GIF、MP4 等媒体格式，不依赖远端 MIME 或扩展名
+- SQLite、MySQL/MariaDB 或 PostgreSQL 持久化群绑定、群设置和消息映射
 - 独立配置两侧 HTTP 或 SOCKS5 代理
 - 消息发送失败重试和最终失败通知
+- 通过 Telegram `/status` 查看内存、队列和最近媒体转换耗时
 
 各消息类型的支持程度、限制与待办事项见 [消息类型支持清单](TODO.md)。
 
@@ -37,15 +39,15 @@ OneBot 群
     │
     │ OneBot 11 反向 WebSocket
     ▼
-Q2TG-Python ─── SQLite / 媒体处理 ─── Telegram Bot API
+Q2TG-Python ─── SQL 数据库 / 媒体处理 ─── Telegram Bot API
     ▲                                      │
     └──────────────────────────────────────┘
                  双向消息转发
 ```
 
-服务启动后会运行 FastAPI、SQLite 和媒体处理任务；OneBot WebSocket 通过鉴权后，才会在
-该连接存续期间运行 Telegram Bot 与消息消费者。群绑定及消息映射保存在
-`data/q2tg.db`，消息映射默认保留 30 天。
+服务启动后会运行 FastAPI、数据库和媒体处理任务；OneBot WebSocket 通过鉴权后，才会在
+该连接存续期间运行 Telegram Bot 与消息消费者。群绑定及消息映射默认保存在
+`data/q2tg.db`，也可改用 MySQL/MariaDB 或 PostgreSQL；消息映射默认保留 30 天。
 
 ## 环境要求
 
@@ -100,6 +102,7 @@ curl --fail --location --remote-name \
 
 ```dotenv
 Q2TG_ONEBOT_TOKEN=replace-with-a-random-token
+Q2TG_DATABASE_URL=sqlite:////app/data/q2tg.db
 Q2TG_TGBOT_TOKEN=replace-with-telegram-bot-token
 Q2TG_TGBOT_ADMIN=123456789
 Q2TG_ONEBOT_PROXY_URL=
@@ -115,6 +118,7 @@ SNOWLUMA_GID=1000
 | 配置项 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `Q2TG_ONEBOT_TOKEN` | 是 | 无 | OneBot 反向 WebSocket 的 Bearer token |
+| `Q2TG_DATABASE_URL` | 否 | `sqlite:////app/data/q2tg.db` | 标准数据库 URL，支持 SQLite、MySQL/MariaDB 和 PostgreSQL |
 | `Q2TG_TGBOT_TOKEN` | 是 | 无 | Telegram Bot token |
 | `Q2TG_TGBOT_ADMIN` | 是 | 无 | 有权执行 `/bind`、`/unbind` 的 Telegram 用户 ID |
 | `Q2TG_ONEBOT_PROXY_URL` | 否 | 空 | OneBot 媒体下载代理 |
@@ -129,6 +133,18 @@ SNOWLUMA_GID=1000
 [@BotFather](https://t.me/BotFather) 获取。代理支持 `http://`、`https://`、
 `socks5://` 和 `socks5h://`，留空表示直连。程序不读取 `HTTP_PROXY`、
 `HTTPS_PROXY` 或 `ALL_PROXY`。
+
+`Q2TG_DATABASE_URL` 必须使用不带驱动名的标准 scheme：
+
+```text
+sqlite:////app/data/q2tg.db
+mysql://user:password@database-host:3306/q2tg
+postgresql://user:password@database-host:5432/q2tg
+```
+
+不要配置 `sqlite+aiosqlite://`、`mysql+asyncmy://` 或 `postgresql+asyncpg://`；程序会在
+内部自动选择异步驱动。仓库提供的 Compose 不包含 MySQL 或 PostgreSQL 服务，使用外部
+数据库时需要自行提供数据库实例，并确保 `q2tg-python` 容器可以访问对应主机和端口。
 
 `SNOWLUMA_HOSTNAME` 推荐使用 `DESKTOP-{随机 5-6 位大写字母或数字}` 的格式，例如
 `DESKTOP-A7K2QF`。可生成一个 6 位后缀：
@@ -161,7 +177,7 @@ docker compose logs -f snowluma
 
 Compose 使用 bind mount 持久化以下目录：
 
-- `./q2tg-data`：SQLite 数据库
+- `./q2tg-data`：默认 SQLite 数据库；使用外部数据库时仍可保留该挂载
 - `./snowluma-data`：SnowLuma 数据
 - `./snowluma-qq-config`：账号配置
 - `./snowluma-qq-data`：账号数据
@@ -187,8 +203,8 @@ Token: Q2TG_ONEBOT_TOKEN 的值
 两个服务加入同一个 Compose 网络，`q2tg-python` 是容器内 DNS 服务名。Compose 已将
 `Q2TG_ONEBOT_MEDIA_URL` 固定为 `http://q2tg-python:8000`，无需在 `.env` 中声明。
 
-OneBot WebSocket 通过鉴权后，Telegram Bot 和消息转发消费者才会开始运行。此时可在
-Telegram 中向 Bot 发送 `/start`，然后将 Bot 加入目标群聊并执行绑定命令。
+OneBot WebSocket 通过鉴权后，Telegram Bot 和消息转发消费者才会开始运行。此时管理员可
+在私聊中向 Bot 发送 `/start` 查看桥接步骤，然后将 Bot 加入目标群聊并执行绑定命令。
 
 ### 运维
 
@@ -263,11 +279,13 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 
 ## Telegram 命令
 
-以下命令应在 Telegram 群聊中使用：
+`/start` 会根据私聊或群聊返回不同内容，`/status` 可在两种聊天中使用；其余桥接和管理
+命令应在 Telegram 群聊中使用：
 
 | 命令 | 权限 | 说明 |
 | --- | --- | --- |
-| `/start` | 所有人 | 检查 Bot 是否启动 |
+| `/start` | 所有人 | 群聊中显示运行状态；私聊中向配置的管理员显示桥接步骤，其他用户显示管理员联系方式 |
+| `/status` | 所有人 | 在私聊或群聊中显示进程 RSS、各消息队列长度及最近 30 次成功媒体转换的平均耗时 |
 | `/bind <OneBot 群号>` | 配置的 Bot 管理员 | 绑定当前 Telegram 群与 OneBot 群 |
 | `/unbind` | 配置的 Bot 管理员 | 解除当前群的绑定 |
 | `/forward [on\|off]` | Telegram 群管理员 | 查询或设置 Telegram 到 OneBot 的转发状态 |
@@ -284,14 +302,25 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 
 ## 数据与限制
 
-- SQLite 数据库位于 `data/q2tg.db`
-- Docker 部署应持久化 `/app/data`
+- 默认 SQLite 数据库位于 `data/q2tg.db`；Docker Compose 中对应 `/app/data/q2tg.db`
+- 可通过 `Q2TG_DATABASE_URL` 使用 MySQL/MariaDB 或 PostgreSQL，URL 中必须包含数据库名
+- Docker 使用默认 SQLite 时应持久化 `/app/data`；外部数据库应按其自身方案备份和持久化
 - 消息映射默认保留 30 天
 - 单个下载媒体的大小上限为 20 MB
 - 视频、语音和贴纸转换依赖 ffmpeg、ffprobe、Pillow、pilk 与
   [lottie-converter](https://github.com/ed-asriyan/lottie-converter)
 - TGS 输入仍受 Telegram Bot API 下载上限限制；转换后的 GIF 不设置额外大小上限
-- 删除容器前未持久化 `/app/data` 会丢失群绑定和消息映射
+- 使用默认 SQLite 时，删除容器前未持久化 `/app/data` 会丢失群绑定和消息映射
+
+### 数据库迁移
+
+应用每次启动都会通过 Alembic 将数据库自动升级到当前 schema。升级前应备份数据库；不要
+让多个 Q2TG-Python 实例同时对同一个数据库执行首次启动或升级。
+
+历史 SQLite 数据库会被自动识别并接入 Alembic，包括旧的三表 schema 和当前四表 schema。
+对于 MySQL/MariaDB 或 PostgreSQL，程序只会自动初始化空数据库，或升级已经包含
+`alembic_version` 标记的数据库。非空且没有该标记的外部数据库会被拒绝接管，以免误改
+其他应用的表。
 
 ## 常见问题
 
@@ -310,7 +339,7 @@ Telegram Bot 是否有读取和发送群消息所需的权限。
 检查媒体是否超过 20 MB、`Q2TG_ONEBOT_MEDIA_URL` 是否可访问，以及系统中的 ffmpeg 和
 ffprobe 是否可用。
 
-### Docker 容器无法写入数据库
+### Docker 容器无法写入 SQLite 数据库
 
 命名 volume 通常不需要额外处理。使用宿主机目录时，请确保挂载目录允许 UID/GID
 `10001` 写入。
@@ -320,7 +349,7 @@ ffprobe 是否可用。
 - 不要公开 `.env`、Bot token 或 OneBot token
 - 建议仅向可信网络开放服务端口
 - 使用公网地址时建议通过 HTTPS 和可信反向代理提供服务
-- 定期备份 `data/q2tg.db`
+- 定期备份 SQLite 的 `data/q2tg.db`，或按外部数据库的备份方案保护数据
 - token 泄露后应立即撤销并重新生成
 
 ## 本地开发与测试
@@ -336,6 +365,7 @@ cp .env.example .env
 
 ```dotenv
 Q2TG_APP_PORT=8000
+# Q2TG_DATABASE_URL=sqlite:////absolute/path/to/q2tg.db
 Q2TG_ONEBOT_TOKEN=replace-with-onebot-token
 Q2TG_ONEBOT_MEDIA_URL=http://127.0.0.1:8000
 Q2TG_ONEBOT_PROXY_URL=
@@ -346,7 +376,14 @@ Q2TG_TGBOT_PROXY_URL=
 
 `Q2TG_APP_PORT` 是本地 HTTP 服务和 OneBot 反向 WebSocket 的监听端口，默认值为
 `8000`。`Q2TG_ONEBOT_MEDIA_URL` 必须是 OneBot 侧能够访问的本服务 HTTP(S) 地址。
-进程中的同名环境变量优先于 `.env`。
+进程中的同名环境变量优先于 `.env`。数据库 URL 使用标准 scheme，程序内部会分别选择
+`aiosqlite`、`asyncmy` 或 `asyncpg`：
+
+```text
+sqlite:////absolute/path/to/q2tg.db
+mysql://user:password@host:3306/q2tg
+postgresql://user:password@host:5432/q2tg
+```
 
 本地运行时，TGS 动态贴纸转换要求已安装 Docker，Docker daemon 正在运行，并且当前用户
 有权执行 `docker run`。项目会自动调用固定版本的 `lottie-converter` 镜像，不使用
@@ -405,6 +442,21 @@ GET /healthz
 ```bash
 uv run --locked python -W error::ResourceWarning -m unittest discover -s tests
 ```
+
+`tests/test_database_integration.py` 默认跳过。需要验证 MySQL/MariaDB 或 PostgreSQL 时，
+提供一个允许测试创建和删除 Q2TG 业务表的独立空数据库：
+
+```bash
+Q2TG_TEST_DATABASE_URL=mysql://user:password@127.0.0.1:3306/q2tg_test \
+  uv run --locked python -m unittest tests.test_database_integration
+
+Q2TG_TEST_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/q2tg_test \
+  uv run --locked python -m unittest tests.test_database_integration
+```
+
+> [!WARNING]
+> 集成测试启动前会删除该数据库中的 Q2TG 业务表和 `alembic_version`。不要指向生产数据库
+> 或包含其他重要数据的数据库。
 
 运行静态检查：
 

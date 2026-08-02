@@ -54,7 +54,7 @@ async def lifespan(app: FastAPI):
     """管理不依赖 SnowLuma 连接的应用级资源。
 
     启动顺序：
-    1. 打开 SQLite；
+    1. 打开并迁移数据库；
     2. 启动数据库和媒体缓存的定时清理；
     3. 启动重试调度器和单并发媒体预处理 worker。
 

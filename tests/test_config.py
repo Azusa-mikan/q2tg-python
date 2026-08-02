@@ -34,6 +34,7 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.app_port, 8000)
         self.assertEqual(settings.onebot_media_url, "http://127.0.0.1:8000")
+        self.assertTrue(settings.database_url.startswith("sqlite:///"))
         self.assertIsNone(settings.onebot_proxy_url)
         self.assertIsNone(settings.tgbot_proxy_url)
 
@@ -94,6 +95,39 @@ class ConfigTests(unittest.TestCase):
             settings = load_settings(Path(directory) / "missing.env")
 
         self.assertEqual(settings.app_port, 8000)
+
+    def test_supported_database_urls_are_accepted(self) -> None:
+        environment = {
+            "Q2TG_ONEBOT_TOKEN": "onebot-token",
+            "Q2TG_ONEBOT_MEDIA_URL": "https://bridge.example",
+            "Q2TG_TGBOT_TOKEN": "telegram-token",
+            "Q2TG_TGBOT_ADMIN": "456",
+        }
+        for database_url in (
+            "sqlite:////tmp/q2tg.db",
+            "mysql://user:password@localhost:3306/q2tg",
+            "postgresql://user:password@localhost:5432/q2tg",
+        ):
+            with self.subTest(database_url=database_url), TemporaryDirectory() as directory:
+                environment["Q2TG_DATABASE_URL"] = database_url
+                with patch.dict(os.environ, environment, clear=True):
+                    settings = load_settings(Path(directory) / "missing.env")
+                self.assertEqual(settings.database_url, database_url)
+
+    def test_database_url_with_driver_name_is_rejected(self) -> None:
+        environment = {
+            "Q2TG_DATABASE_URL": "postgresql+asyncpg://user:password@localhost/q2tg",
+            "Q2TG_ONEBOT_TOKEN": "onebot-token",
+            "Q2TG_ONEBOT_MEDIA_URL": "https://bridge.example",
+            "Q2TG_TGBOT_TOKEN": "telegram-token",
+            "Q2TG_TGBOT_ADMIN": "456",
+        }
+        with (
+            TemporaryDirectory() as directory,
+            patch.dict(os.environ, environment, clear=True),
+            self.assertRaises(ValidationError),
+        ):
+            load_settings(Path(directory) / "missing.env")
 
 
 if __name__ == "__main__":

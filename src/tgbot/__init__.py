@@ -11,9 +11,11 @@ from .handlers import TGhandlers
 
 BOT_COMMANDS = (
     BotCommand("start", "查看 Bot 运行状态"),
+    BotCommand("status", "查看 Q2TG 运行状态"),
     BotCommand("bind", "绑定当前 Telegram 群与 Onebot 群"),
     BotCommand("unbind", "解除当前群的 Onebot 群绑定"),
     BotCommand("forward", "查看或设置 Telegram 到 Onebot 转发"),
+    BotCommand("id_show", "查看或设置 Onebot 用户 ID 显示"),
     BotCommand("undo", "撤回所回复消息的双侧副本"),
 )
 

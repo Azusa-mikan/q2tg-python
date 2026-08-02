@@ -22,6 +22,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.helpers import escape_markdown
 
 from src.bus import message_bus
 from src.config import config
@@ -31,6 +32,7 @@ from src.messages import TelegramMedia, TelegramMessage
 from src.notice import enqueue_bridge_notice
 from src.processing import media_processor
 from src.qbot import q_gateway
+from src.runtime_stats import get_runtime_info
 from src.sql import sql
 
 TELEGRAM_DOWNLOAD_LIMIT = 20_000_000
@@ -56,25 +58,6 @@ def forward_origin_name(origin: MessageOrigin | None) -> str | None:
         )
     return None
 
-
-def command(cmd: str):
-    """给方法附加命令处理器元数据，实际 Handler 在 get_handlers 中创建。"""
-
-    def decorator(fn):
-        fn._ptb_handler = ("command", cmd)
-        return fn
-    return decorator
-
-
-def message(filter: filters.BaseFilter):
-    """给方法附加消息过滤器元数据。"""
-
-    def decorator(fn):
-        fn._ptb_handler = ("message", filter)
-        return fn
-    return decorator
-
-
 class TGhandlers:
     """Telegram 命令、文本和媒体入口集合。
 
@@ -92,14 +75,45 @@ class TGhandlers:
         # 由 SnowLuma WebSocket 会话注入和关闭，handlers 不拥有该客户端的生命周期。
         self.download_client: httpx.AsyncClient | None = None
 
-    @command("start")
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """提供一个简单的存活确认命令。"""
-        if not (msg := update.message):
+        """在群聊显示状态，在私聊提供管理员引导或联系方式。"""
+        msg = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if msg is None or chat is None or user is None:
             return
-        await msg.reply_text("Bot 已启动！")
 
-    @command("bind")
+        if chat.type in {"group", "supergroup"}:
+            await self.get_status(update, context)
+            return
+
+        if user.id == config.tgbot_admin:
+            await msg.reply_markdown_v2(
+                text=(
+                    "欢迎使用 Q2TG\\-Python！\n\n"
+                    "请先将本 Bot 加入需要桥接的 Telegram 群聊，"
+                    "并将 OneBot 机器人加入对应的 OneBot 群聊。\n\n"
+                    "然后在 Telegram 群聊中发送：\n"
+                    "`/bind <OneBot 群号>`\n\n"
+                    "Copyright 2026 Azusa\\-mikan"
+                )
+            )
+            return
+
+        admin_user = await context.bot.get_chat(config.tgbot_admin)
+        admin_name = escape_markdown(
+            admin_user.full_name or str(admin_user.id),
+            version=2,
+        )
+        user_url = (
+            f"https://t.me/{admin_user.username}"
+            if admin_user.username is not None
+            else f"tg://user?id={admin_user.id}"
+        )
+        await msg.reply_markdown_v2(
+            f"你无权使用此机器人，请联系 [{admin_name}]({user_url})"
+        )
+
     async def bind(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """由管理员在当前 Telegram 群绑定一个 OneBot 群号。"""
         msg = update.effective_message
@@ -134,7 +148,6 @@ class TGhandlers:
             text=f"已绑定 Telegram 群与 Onebot 群 {q_group_id}",
         )
 
-    @command("unbind")
     async def unbind(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """解除当前 Telegram 群的双向绑定。"""
         msg = update.effective_message
@@ -161,7 +174,6 @@ class TGhandlers:
             text=f"已解除 Telegram 群与 Onebot 群 {q_group_id} 的绑定",
         )
 
-    @command("forward")
     async def forward(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """查询或设置当前 Telegram 群到 Onebot 的转发开关。"""
         msg = update.effective_message
@@ -217,7 +229,6 @@ class TGhandlers:
             text=f"Telegram → Onebot 转发已{'开启' if enabled else '关闭'}",
         )
 
-    @command("id_show")
     async def id_show(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """查询或设置 Onebot 用户及 @ 对象是否在 Telegram 显示数字 ID。"""
         msg = update.effective_message
@@ -252,7 +263,6 @@ class TGhandlers:
             return
         await msg.reply_text(f"Onebot 用户及 @ 对象 ID 显示已{'开启' if enabled else '关闭'}")
 
-    @command("undo")
     async def undo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """撤回被回复消息在 Telegram 和 OneBot 两侧的对应消息。"""
         msg = update.effective_message
@@ -297,10 +307,39 @@ class TGhandlers:
             )
         await msg.delete()
 
-    @message(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND)
+    async def get_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """显示进程内存、队列长度和媒体转换平均耗时。"""
+        msg = update.effective_message
+        if msg is None:
+            return
+        data = get_runtime_info()
+        queues = data.queues
+        averages = data.conversion_averages
+
+        def average_text(value: float | None) -> str:
+            return "暂无数据" if value is None else f"{value:.2f} 秒"
+
+        reply_text = (
+            "Q2TG 状态\n\n"
+            f"RSS：{data.rss}\n\n"
+            "消息队列\n"
+            f"OneBot：{queues.onebot}\n"
+            f"Telegram：{queues.telegram}\n"
+            f"重试：{queues.retry}\n"
+            f"媒体处理：{queues.media_processing}\n\n"
+            "平均转换耗时（最近 30 次）\n"
+            f"语音：{average_text(averages.voice)}\n"
+            f"视频：{average_text(averages.video)}\n"
+            f"静态贴纸：{average_text(averages.sticker_static)}\n"
+            f"TGS 贴纸：{average_text(averages.sticker_tgs)}\n"
+            f"视频贴纸：{average_text(averages.sticker_video)}"
+        )
+        await msg.reply_text(reply_text)
+
     async def receive_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """把 Telegram 群中的非命令文本转换为 TelegramMessage。"""
-        if not (msg := update.message):
+        msg = update.effective_message
+        if msg is None:
             return
         if not await sql.get_tg_forward_enabled(msg.chat_id):
             return
@@ -320,19 +359,10 @@ class TGhandlers:
         )
         await message_bus.put(telegram_forward_task(message, q_gateway, context.bot))
 
-    @message(
-        filters.ChatType.GROUPS
-        & (
-            filters.PHOTO
-            | filters.VIDEO
-            | filters.VOICE
-            | filters.Document.ALL
-            | filters.Sticker.ALL
-        )
-    )
     async def receive_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理单个图片、视频、语音或文件，或按 media_group_id 收集媒体组。"""
-        if not (msg := update.message):
+        msg = update.effective_message
+        if msg is None:
             return
         if msg.media_group_id is None:
             try:
@@ -574,27 +604,26 @@ class TGhandlers:
         if not media:
             return
 
-    def get_handlers(self):
-        """扫描继承层次中的装饰器元数据并创建 PTB Handler。
-
-        运行时实例是 TGBot，而方法定义在父类 TGhandlers 中，因此必须遍历完整
-        MRO，不能只查看 vars(type(self))。子类同名方法会覆盖父类注册项。
-        """
-        handlers: list[BaseHandler] = []
-        methods = {}
-        # 从基类到子类更新字典，确保最后保留最具体的实现。
-        for cls in reversed(type(self).__mro__):
-            methods.update(vars(cls))
-
-        for fn in methods.values():
-            info = getattr(fn, "_ptb_handler", None)
-            if info is None:
-                continue
-            kind, arg = info
-            bound = fn.__get__(self, self.__class__)
-            # 装饰器只保存元数据；这里才把未绑定函数变成当前实例的绑定方法。
-            if kind == "command":
-                handlers.append(CommandHandler(arg, bound))
-            elif kind == "message":
-                handlers.append(MessageHandler(arg, bound))
-        return handlers
+    def get_handlers(self) -> list[BaseHandler]:
+        """显式创建全部 PTB handlers，注册顺序与匹配优先级一目了然。"""
+        media_filter = filters.ChatType.GROUPS & (
+            filters.PHOTO
+            | filters.VIDEO
+            | filters.VOICE
+            | filters.Document.ALL
+            | filters.Sticker.ALL
+        )
+        return [
+            CommandHandler("start", self.start),
+            CommandHandler("bind", self.bind),
+            CommandHandler("unbind", self.unbind),
+            CommandHandler("forward", self.forward),
+            CommandHandler("id_show", self.id_show),
+            CommandHandler("undo", self.undo),
+            CommandHandler("status", self.get_status),
+            MessageHandler(
+                filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
+                self.receive_message,
+            ),
+            MessageHandler(media_filter, self.receive_media),
+        ]

@@ -213,7 +213,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         async def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,
-                content=b"video",
+                content=b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2",
                 headers={"content-type": "video/mp4"},
                 request=request,
             )
@@ -250,6 +250,46 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(mapping)
         assert mapping is not None
         self.assertEqual(mapping.tg_message_ids, (201,))
+
+    async def test_fake_mp4_is_sent_as_document(self) -> None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=b"not an mp4",
+                headers={"content-type": "video/mp4"},
+                request=request,
+            )
+
+        bot = SimpleNamespace(
+            send_video=AsyncMock(),
+            send_document=AsyncMock(return_value=SimpleNamespace(message_id=201)),
+        )
+        message = OneBotMessage(
+            message_id=101,
+            group_id=123,
+            user_id=1,
+            sender_name="OneBot User",
+            message=[
+                {
+                    "type": "video",
+                    "data": {
+                        "file": "clip.mp4",
+                        "url": "https://example.test/video",
+                    },
+                }
+            ],
+        )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            with patch("src.forwarding.sql", self.database):
+                await forward_onebot_to_telegram(
+                    message,
+                    cast(ExtBot[None], bot),
+                    client,
+                )
+
+        bot.send_video.assert_not_awaited()
+        bot.send_document.assert_awaited_once()
 
     async def test_disabled_id_show_hides_only_fallback_user_id(self) -> None:
         await self.database.set_id_show_enabled(-456, False)

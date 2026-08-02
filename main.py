@@ -9,7 +9,7 @@ from src.config import config
 def main() -> None:
     """启动 FastAPI 应用。
 
-    SQLite 和媒体预处理 worker 由 FastAPI lifespan 管理；Telegram Bot、消息消费者和媒体下载客户端
+    数据库和媒体预处理 worker 由 FastAPI lifespan 管理；Telegram Bot、消息消费者和媒体下载客户端
     只在通过认证的 SnowLuma WebSocket 连接存续期间运行。
     """
     uvicorn.run(

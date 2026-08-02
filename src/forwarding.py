@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
-from mimetypes import guess_type
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+import filetype
 import httpx
 from telegram import (
     Bot,
@@ -39,6 +39,7 @@ from src.notice import (
     enqueue_telegram_notice,
 )
 from src.processing import ProcessingTask
+from src.runtime_stats import track_conversion
 from src.sql import sql
 from src.sticker import static_sticker_to_png, tgs_sticker_to_gif, video_sticker_to_gif
 from src.video import normalize_video_for_onebot
@@ -383,7 +384,7 @@ async def forward_onebot_to_telegram(
             )
             try:
                 if kind == "record":
-                    await normalize_onebot_record(content)
+                    await track_conversion("voice", normalize_onebot_record(content))
                 is_gif = kind == "image" and _is_gif(content)
                 upload_filename = (
                     f"{Path(filename).stem or 'animation'}.gif" if is_gif else filename
@@ -649,18 +650,21 @@ async def finalize_telegram_message(msg: TelegramMessage) -> None:
 
 def _is_mp4(content: MediaFile) -> bool:
     """Telegram 只有 MP4 能作为可播放视频，其它容器按文件发送。"""
-    guessed_type, _ = guess_type(Path(content.filename).name)
-    return content.media_type == "video/mp4" or guessed_type == "video/mp4"
+    return _media_mime(content) == "video/mp4"
 
 
 def _is_gif(content: MediaFile) -> bool:
-    """通过 MIME 或文件签名识别 Onebot image 段中的动态 GIF。"""
-    if content.media_type.lower() == "image/gif":
-        return True
+    """通过文件签名识别 Onebot image 段中的动态 GIF。"""
+    return _media_mime(content) == "image/gif"
+
+
+def _media_mime(content: MediaFile) -> str | None:
+    """读取公开格式的文件签名，不信任远端 MIME 和文件扩展名。"""
     position = content.file.tell()
     try:
         content.file.seek(0)
-        return content.file.read(6) in {b"GIF87a", b"GIF89a"}
+        kind = filetype.guess(content.file.read(261))
+        return kind.mime if kind is not None else None
     finally:
         content.file.seek(position)
 
@@ -757,21 +761,33 @@ async def prepare_telegram_forward(
 
     for attachment in msg.media:
         if attachment.processing == "video":
-            await normalize_video_for_onebot(
-                attachment.content,
-                size_limit=TELEGRAM_VIDEO_LIMIT,
+            await track_conversion(
+                "video",
+                normalize_video_for_onebot(
+                    attachment.content,
+                    size_limit=TELEGRAM_VIDEO_LIMIT,
+                ),
             )
         elif attachment.processing == "sticker_static":
-            await static_sticker_to_png(
-                attachment.content,
-                size_limit=TELEGRAM_VIDEO_LIMIT,
+            await track_conversion(
+                "sticker_static",
+                static_sticker_to_png(
+                    attachment.content,
+                    size_limit=TELEGRAM_VIDEO_LIMIT,
+                ),
             )
         elif attachment.processing == "sticker_tgs":
-            await tgs_sticker_to_gif(attachment.content)
+            await track_conversion(
+                "sticker_tgs",
+                tgs_sticker_to_gif(attachment.content),
+            )
         elif attachment.processing == "sticker_video":
-            await video_sticker_to_gif(
-                attachment.content,
-                size_limit=TELEGRAM_VIDEO_LIMIT,
+            await track_conversion(
+                "sticker_video",
+                video_sticker_to_gif(
+                    attachment.content,
+                    size_limit=TELEGRAM_VIDEO_LIMIT,
+                ),
             )
     normalized_size = sum(attachment.content.size for attachment in msg.media)
     if normalized_size < msg.queue_bytes:
