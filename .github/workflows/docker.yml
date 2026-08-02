@@ -1,4 +1,5 @@
 name: Build and publish Docker image
+run-name: Docker ${{ inputs.version || format('run-{0}', github.run_number) }}
 
 on:
   workflow_dispatch:
