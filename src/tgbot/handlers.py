@@ -26,7 +26,11 @@ from telegram.helpers import escape_markdown
 
 from src.bus import message_bus
 from src.config import config
-from src.forwarding import telegram_forward_task, telegram_processing_task
+from src.forwarding import (
+    telegram_forward_task,
+    telegram_pin_task,
+    telegram_processing_task,
+)
 from src.media import MediaFile, media_item_budget, media_queue_budget
 from src.messages import TelegramMedia, TelegramMessage
 from src.notice import enqueue_bridge_notice
@@ -307,6 +311,45 @@ class TGhandlers:
             )
         await msg.delete()
 
+    async def unpin(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """取消被回复消息在 Telegram 的置顶和 OneBot 的精华状态。"""
+        msg = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if msg is None or chat is None or user is None:
+            return
+        if chat.type not in {"group", "supergroup"}:
+            await msg.reply_text("请在 Telegram 群聊中使用此命令")
+            return
+        target = msg.reply_to_message
+        if target is None:
+            await msg.reply_text("请回复需要取消置顶的消息后使用 /unpin")
+            return
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        if member.status not in {ChatMember.ADMINISTRATOR, ChatMember.OWNER}:
+            await msg.reply_text("只有群聊管理员可以取消置顶")
+            return
+        mapping = await sql.get_q_message(chat.id, target.message_id)
+        if mapping is None:
+            await msg.reply_text("未找到该消息的跨平台映射")
+            return
+
+        failures = 0
+        for message_id in mapping.q_message_ids:
+            try:
+                await q_gateway.delete_essence_message(message_id)
+            except RuntimeError:
+                failures += 1
+        if failures:
+            await msg.reply_text("OneBot 取消精华失败，机器人权限可能不足")
+            return
+        for message_id in mapping.tg_message_ids:
+            await context.bot.unpin_chat_message(
+                chat_id=mapping.tg_chat_id,
+                message_id=message_id,
+            )
+        await msg.delete()
+
     async def get_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """显示进程内存、队列长度和媒体转换平均耗时。"""
         msg = update.effective_message
@@ -362,6 +405,22 @@ class TGhandlers:
             ),
         )
         await message_bus.put(telegram_forward_task(message, q_gateway, context.bot))
+
+    async def receive_pinned_message(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """把 Telegram 用户置顶的消息交给 OneBot 精华事件队列。"""
+        msg = update.effective_message
+        if msg is None or msg.pinned_message is None:
+            return
+        if msg.from_user is not None and msg.from_user.id == context.bot.id:
+            # OneBot 精华同步触发的 Telegram 服务消息不能再次回传。
+            return
+        await message_bus.put(
+            telegram_pin_task(msg.chat_id, msg.pinned_message.message_id, q_gateway)
+        )
 
     async def receive_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理单个图片、视频、语音或文件，或按 media_group_id 收集媒体组。"""
@@ -624,7 +683,12 @@ class TGhandlers:
             CommandHandler("forward", self.forward),
             CommandHandler("id_show", self.id_show),
             CommandHandler("undo", self.undo),
+            CommandHandler("unpin", self.unpin),
             CommandHandler("status", self.get_status),
+            MessageHandler(
+                filters.ChatType.GROUPS & filters.StatusUpdate.PINNED_MESSAGE,
+                self.receive_pinned_message,
+            ),
             MessageHandler(
                 filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
                 self.receive_message,

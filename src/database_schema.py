@@ -7,6 +7,13 @@ metadata = sa.MetaData()
 # SQLite 只有精确的 INTEGER PRIMARY KEY 才会自动生成 rowid。
 mapping_id_type = sa.BigInteger().with_variant(sa.Integer(), "sqlite")
 
+application_settings = sa.Table(
+    "application_settings",
+    metadata,
+    sa.Column("key", sa.String(64), primary_key=True),
+    sa.Column("value", sa.Text(), nullable=False),
+)
+
 group_mappings = sa.Table(
     "group_mappings",
     metadata,

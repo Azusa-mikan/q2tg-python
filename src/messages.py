@@ -9,6 +9,14 @@ from typing import Any, Literal
 
 from src.media import MediaFile
 
+ONEBOT_USER_NAME = "OneBot 用户"
+
+
+@dataclass(frozen=True, slots=True)
+class TelegraphPageRef:
+    title: str
+    url: str
+
 
 @dataclass(slots=True, kw_only=True)
 class OneBotMessage:
@@ -30,6 +38,8 @@ class OneBotMessage:
     mention_names: dict[int, str | None] = field(default_factory=dict)
     # 转发开始后记录实际 Telegram 目标，供并发到达的撤回事件清理部分发送结果。
     tg_chat_id: int | None = None
+    # Telegraph 页面创建后跨 Telegram 发送重试复用，避免生成重复页面。
+    telegraph_pages: dict[str, TelegraphPageRef] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -61,6 +71,15 @@ class OneBotPokeEvent:
     target_id: int
     action: str
     suffix: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OneBotEssenceEvent:
+    """经过入口校验的 OneBot 精华消息添加或删除事件。"""
+
+    group_id: int
+    message_id: int
+    added: bool
 
 
 @dataclass(slots=True, kw_only=True)

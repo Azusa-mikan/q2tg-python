@@ -33,9 +33,11 @@ from src.face import (
 from src.log import baselog
 from src.media import MediaFile, media_cache, media_queue_budget
 from src.messages import (
+    ONEBOT_USER_NAME,
     FailureAction,
     MediaTooLargeError,
     OneBotConnectionError,
+    OneBotEssenceEvent,
     OneBotGroupBanEvent,
     OneBotGroupMemberEvent,
     OneBotMessage,
@@ -335,17 +337,45 @@ async def forward_onebot_to_telegram(
         else False
     )
     has_faces = any(segment.get("type") == "face" for segment in normalized_message)
+    has_forwards = any(segment.get("type") == "forward" for segment in normalized_message)
+    markdown_v2 = has_faces or has_forwards
     text = await onebot_message_text(
         normalized_message,
         msg.group_id,
         gateway,
         id_show_enabled=id_show_enabled,
         member_names=msg.mention_names,
-        markdown_v2=has_faces,
+        markdown_v2=markdown_v2,
     )
+    forward_links: list[str] = []
+    for segment in normalized_message:
+        if segment.get("type") != "forward":
+            continue
+        segment_data = segment.get("data")
+        forward_id = segment_data.get("id") if isinstance(segment_data, dict) else None
+        if not isinstance(forward_id, str) or not forward_id:
+            continue
+        page = msg.telegraph_pages.get(forward_id)
+        if page is None:
+            from src.onebot_forward import create_forward_page
+            from src.telegraph_client import telegraph_client
+
+            if gateway is None:
+                raise RuntimeError("OneBot 合并转发缺少可用的 gateway")
+            page = await create_forward_page(
+                forward_id,
+                gateway,
+                telegraph_client,
+            )
+            msg.telegraph_pages[forward_id] = page
+        link_title = escape_markdown(page.title, version=2)
+        forward_links.append(f"[{link_title}]({page.url})")
+    if forward_links:
+        forward_text = "\n".join(forward_links)
+        text = f"{text}\n{forward_text}" if text else forward_text
     if msg.sender_name_is_fallback and not id_show_enabled:
-        sender_name = "OneBot 用户"
-    if has_faces and super_face_id is None:
+        sender_name = ONEBOT_USER_NAME
+    if markdown_v2 and super_face_id is None:
         sender_name = escape_markdown(sender_name, version=2)
     media, unavailable = onebot_message_media(normalized_message)
     if not text and not media and not unavailable:
@@ -359,7 +389,10 @@ async def forward_onebot_to_telegram(
             f"[{labels[kind]}无法转发：缺少可用的 HTTP(S) 下载地址]"
             for kind in dict.fromkeys(unavailable)
         ]
-        caption += "\n" + "\n".join(notices)
+        notice_text = "\n".join(notices)
+        caption += "\n" + (
+            escape_markdown(notice_text, version=2) if markdown_v2 else notice_text
+        )
     reply_parameters = None
     if msg.reply_message_id is not None:
         reply_mapping = await sql.get_tg_message(msg.group_id, msg.reply_message_id)
@@ -369,7 +402,7 @@ async def forward_onebot_to_telegram(
                 allow_sending_without_reply=True,
             )
 
-    if super_face_id is not None:
+    if super_face_id is not None and not has_forwards:
         sticker_file_id = await onebot_super_face_file_id(bot, super_face_id)
         if sticker_file_id is not None:
             if not msg.tg_message_ids:
@@ -391,7 +424,7 @@ async def forward_onebot_to_telegram(
                 group_id,
                 caption,
                 reply_parameters,
-                parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
+                parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
             )
     elif not media:
         await _send_text_chunks(
@@ -400,7 +433,7 @@ async def forward_onebot_to_telegram(
             group_id,
             caption,
             reply_parameters,
-            parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
+            parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
         )
     elif (
         msg.next_media_index == 0
@@ -413,7 +446,7 @@ async def forward_onebot_to_telegram(
             group_id,
             caption,
             reply_parameters,
-            parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
+            parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
         )
         contents: list[MediaFile] = []
         try:
@@ -438,7 +471,7 @@ async def forward_onebot_to_telegram(
                     contents,
                     media_caption,
                     media_reply,
-                    ParseMode.MARKDOWN_V2 if has_faces else None,
+                    ParseMode.MARKDOWN_V2 if markdown_v2 else None,
                 )
             elif as_photos:
                 album = [
@@ -450,7 +483,7 @@ async def forward_onebot_to_telegram(
                             read_file_handle=False,
                         ),
                         caption=media_caption if index == 0 else None,
-                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
+                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
                         show_caption_above_media=index == 0,
                     )
                     for index, (content, (_, _, filename)) in enumerate(
@@ -467,7 +500,7 @@ async def forward_onebot_to_telegram(
                             read_file_handle=False,
                         ),
                         caption=media_caption if index == len(contents) - 1 else None,
-                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
+                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
                     )
                     for index, (content, (_, _, filename)) in enumerate(
                         zip(contents, media, strict=True)
@@ -491,7 +524,7 @@ async def forward_onebot_to_telegram(
             group_id,
             caption,
             reply_parameters,
-            parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
+            parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
         )
         for index in range(msg.next_media_index, len(media)):
             kind, url, filename = media[index]
@@ -522,7 +555,7 @@ async def forward_onebot_to_telegram(
                         chat_id=group_id,
                         voice=upload,
                         caption=item_caption,
-                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
+                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
                         reply_parameters=item_reply,
                     )
                 elif is_gif:
@@ -530,7 +563,7 @@ async def forward_onebot_to_telegram(
                         chat_id=group_id,
                         animation=upload,
                         caption=item_caption,
-                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
+                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
                         show_caption_above_media=True,
                         reply_parameters=item_reply,
                     )
@@ -539,7 +572,7 @@ async def forward_onebot_to_telegram(
                         chat_id=group_id,
                         photo=upload,
                         caption=item_caption,
-                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
+                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
                         show_caption_above_media=True,
                         reply_parameters=item_reply,
                     )
@@ -548,7 +581,7 @@ async def forward_onebot_to_telegram(
                         chat_id=group_id,
                         video=upload,
                         caption=item_caption,
-                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
+                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
                         show_caption_above_media=True,
                         supports_streaming=True,
                         reply_parameters=item_reply,
@@ -558,7 +591,7 @@ async def forward_onebot_to_telegram(
                         chat_id=group_id,
                         document=upload,
                         caption=item_caption,
-                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
+                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
                         reply_parameters=item_reply,
                     )
                 msg.tg_message_ids.append(sent.message_id)
@@ -604,6 +637,49 @@ async def recall_onebot_message_from_telegram(
             chat_id=tg_chat_id,
             message_ids=tg_message_ids[index : index + 100],
         )
+
+
+async def forward_onebot_essence_to_telegram(
+    event: OneBotEssenceEvent,
+    bot: ExtBot[None],
+) -> None:
+    """把 OneBot 精华状态应用到映射中的全部 Telegram 消息。"""
+    mapping = await sql.get_tg_message(event.group_id, event.message_id)
+    if mapping is None:
+        baselog.warning(
+            "OneBot 精华事件没有可用的 Telegram 消息映射: group=%s message=%s",
+            event.group_id,
+            event.message_id,
+        )
+        return
+    for message_id in mapping.tg_message_ids:
+        if event.added:
+            await bot.pin_chat_message(
+                chat_id=mapping.tg_chat_id,
+                message_id=message_id,
+                disable_notification=True,
+            )
+        else:
+            await bot.unpin_chat_message(
+                chat_id=mapping.tg_chat_id,
+                message_id=message_id,
+            )
+
+
+def onebot_essence_task(
+    event: OneBotEssenceEvent,
+    bot: ExtBot[None],
+) -> SendTask:
+    """创建发送到 Telegram 事件队列的精华状态任务。"""
+    action = "add" if event.added else "delete"
+    return SendTask(
+        target=SendTarget.TELEGRAM,
+        lane=SendLane.EVENT,
+        send=partial(forward_onebot_essence_to_telegram, event, bot),
+        failure_action=_telegram_failure_action,
+        max_attempts=MAX_SEND_ATTEMPTS,
+        label=f"onebot-essence-{action}:{event.group_id}:{event.message_id}",
+    )
 
 
 def format_duration(seconds: int) -> str:
@@ -1006,6 +1082,45 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
         )
     except Exception:  # noqa: BLE001
         baselog.exception("Onebot 消息发送成功，但消息映射保存失败")
+
+
+async def forward_telegram_pin_to_onebot(
+    tg_chat_id: int,
+    tg_message_id: int,
+    gateway: QGateway,
+) -> None:
+    """把 Telegram 置顶应用到映射中的全部 OneBot 消息。"""
+    mapping = await sql.get_q_message(tg_chat_id, tg_message_id)
+    if mapping is None:
+        baselog.warning(
+            "Telegram 置顶事件没有可用的 OneBot 消息映射: chat=%s message=%s",
+            tg_chat_id,
+            tg_message_id,
+        )
+        return
+    for message_id in mapping.q_message_ids:
+        await gateway.set_essence_message(message_id)
+
+
+def telegram_pin_task(
+    tg_chat_id: int,
+    tg_message_id: int,
+    gateway: QGateway,
+) -> SendTask:
+    """创建发送到 OneBot 事件队列的 Telegram 置顶任务。"""
+    return SendTask(
+        target=SendTarget.ONEBOT,
+        lane=SendLane.EVENT,
+        send=partial(
+            forward_telegram_pin_to_onebot,
+            tg_chat_id,
+            tg_message_id,
+            gateway,
+        ),
+        failure_action=_onebot_failure_action,
+        max_attempts=MAX_SEND_ATTEMPTS,
+        label=f"telegram-pin:{tg_chat_id}:{tg_message_id}",
+    )
 
 
 async def finalize_telegram_message(msg: TelegramMessage) -> None:

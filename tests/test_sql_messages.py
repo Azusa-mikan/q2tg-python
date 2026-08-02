@@ -10,6 +10,26 @@ from src.sql import Sql
 
 
 class SqlMessageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_application_setting_persists_and_updates(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.sqlite3"
+            database = Sql(path)
+            await database.load()
+            self.assertIsNone(await database.get_setting("telegraph_access_token"))
+            await database.set_setting("telegraph_access_token", "first-test-token")
+            await database.set_setting("telegraph_access_token", "second-test-token")
+            await database.close()
+
+            reopened = Sql(path)
+            await reopened.load()
+            try:
+                self.assertEqual(
+                    await reopened.get_setting("telegraph_access_token"),
+                    "second-test-token",
+                )
+            finally:
+                await reopened.close()
+
     async def test_initialization_failure_closes_connection(self) -> None:
         with TemporaryDirectory() as directory, patch(
             "src.sql.migrate_database",

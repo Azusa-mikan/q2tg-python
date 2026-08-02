@@ -12,6 +12,7 @@ from src.log import baselog
 from src.media import MediaStream, media_cache
 from src.processing import media_processor
 from src.sql import sql
+from src.telegraph_client import telegraph_client
 from src.ws import router as ws_router
 
 
@@ -98,7 +99,10 @@ async def lifespan(app: FastAPI):
                 finally:
                     await media_processor.close()
                     media_cache.close()
-                    await sql.close()
+                    try:
+                        await telegraph_client.close()
+                    finally:
+                        await sql.close()
 
 # FastAPI 是媒体 HTTP 接口和 SnowLuma WebSocket 路由的统一挂载入口。
 fapp = FastAPI(lifespan=lifespan)

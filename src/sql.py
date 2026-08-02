@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 
 from src.config import config
 from src.database_schema import (
+    application_settings,
     group_mappings,
     message_mappings,
     onebot_message_mappings,
@@ -145,6 +146,30 @@ class Sql:
                     )
                 )
             ).scalar_one_or_none()
+
+    async def get_setting(self, key: str) -> str | None:
+        """读取应用级持久化配置。"""
+        async with self._connection() as connection:
+            return (
+                await connection.execute(
+                    sa.select(application_settings.c.value).where(
+                        application_settings.c.key == key
+                    )
+                )
+            ).scalar_one_or_none()
+
+    async def set_setting(self, key: str, value: str) -> None:
+        """以跨数据库兼容的更新后插入方式保存应用级配置。"""
+        async with self._write_lock, self._transaction() as connection:
+            result = await connection.execute(
+                sa.update(application_settings)
+                .where(application_settings.c.key == key)
+                .values(value=value)
+            )
+            if not result.rowcount:
+                await connection.execute(
+                    sa.insert(application_settings).values(key=key, value=value)
+                )
 
     async def set_tg_forward_enabled(self, tg_chat_id: int, enabled: bool) -> bool:
         return await self._set_group_flag(

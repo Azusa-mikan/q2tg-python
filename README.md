@@ -21,6 +21,8 @@ Q2TG-Python 是一个基于 OneBot 11 与 Telegram Bot API 的双向群消息桥
 
 - OneBot 群与 Telegram 群一对一绑定
 - 双向转发文本、图片、图片组、GIF、文件、视频、语音和贴纸
+- 支持 OneBot 合并转发，并通过 Telegraph 页面展示
+- 同步 OneBot 精华消息与 Telegram 置顶消息
 - 保留消息回复关系与来源引用
 - 映射两侧消息并支持双向撤回
 - HEVC、VP9、WebP 等媒体兼容转换
@@ -122,7 +124,7 @@ SNOWLUMA_GID=1000
 | `Q2TG_TGBOT_TOKEN` | 是 | 无 | Telegram Bot token |
 | `Q2TG_TGBOT_ADMIN` | 是 | 无 | 有权执行 `/bind`、`/unbind` 的 Telegram 用户 ID |
 | `Q2TG_ONEBOT_PROXY_URL` | 否 | 空 | OneBot 媒体下载代理 |
-| `Q2TG_TGBOT_PROXY_URL` | 否 | 空 | Telegram Bot API 和文件下载代理 |
+| `Q2TG_TGBOT_PROXY_URL` | 否 | 空 | Telegram Bot API、文件下载和 Telegraph 请求代理 |
 | `SNOWLUMA_HOSTNAME` | 是 | 无 | 固定的 SnowLuma 容器主机名 |
 | `SHOWLUMA_MAC_ADDRESS` | 是 | 无 | 固定的 SnowLuma 容器 MAC 地址 |
 | `SNOWLUMA_VNC_PASSWD` | 否 | `vncpasswd` | VNC 密码，部署时应覆盖默认值 |
@@ -291,6 +293,7 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 | `/forward [on\|off]` | Telegram 群管理员 | 查询或设置 Telegram 到 OneBot 的转发状态 |
 | `/id_show [on\|off]` | Telegram 群管理员 | 查询或设置 OneBot 用户及 @ 对象的数字 ID 显示 |
 | `/undo` | 按实现权限检查 | 回复目标消息后撤回两侧对应消息 |
+| `/unpin` | Telegram 群管理员 | 回复目标消息后取消两侧对应消息的置顶和精华状态 |
 
 绑定示例：
 
@@ -306,6 +309,7 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 - 可通过 `Q2TG_DATABASE_URL` 使用 MySQL/MariaDB 或 PostgreSQL，URL 中必须包含数据库名
 - Docker 使用默认 SQLite 时应持久化 `/app/data`；外部数据库应按其自身方案备份和持久化
 - 消息映射默认保留 30 天
+- 合并转发页面由 Telegraph 托管，不受本地消息映射保留时间控制
 - 单个下载媒体的大小上限为 20 MB
 - 视频、语音和贴纸转换依赖 ffmpeg、ffprobe、Pillow、pilk 与
   [lottie-converter](https://github.com/ed-asriyan/lottie-converter)

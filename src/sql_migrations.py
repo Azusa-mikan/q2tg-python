@@ -13,13 +13,15 @@ from src.paths import PROJECT_ROOT
 
 LEGACY_REVISION = "0001_legacy_schema"
 CURRENT_REVISION = "0002_onebot_message_mappings"
-HEAD_REVISION = "0003_mapping_id_index"
+INDEX_REVISION = "0003_mapping_id_index"
+HEAD_REVISION = "0004_application_settings"
 LEGACY_TABLES = {
     "group_mappings",
     "message_mappings",
     "telegram_message_mappings",
 }
 CURRENT_TABLES = LEGACY_TABLES | {"onebot_message_mappings"}
+HEAD_TABLES = CURRENT_TABLES | {"application_settings"}
 
 
 def migrate_database(database_url: URL) -> None:
@@ -69,7 +71,7 @@ def _upgrade_database(
         database_url.render_as_string(hide_password=False).replace("%", "%%"),
     )
     config.attributes["configure_logger"] = False
-    application_tables = tables & CURRENT_TABLES
+    application_tables = tables & HEAD_TABLES
 
     if "alembic_version" in tables:
         pass
@@ -80,12 +82,15 @@ def _upgrade_database(
         raise RuntimeError("非空数据库缺少 Alembic 版本标记，拒绝自动接管")
     elif application_tables == LEGACY_TABLES and user_version == 0:
         command.stamp(config, LEGACY_REVISION)
-    elif application_tables == CURRENT_TABLES and user_version == 1:
-        revision = (
-            HEAD_REVISION
-            if "telegram_message_mappings_mapping_id" in indexes
-            else CURRENT_REVISION
-        )
+    elif (
+        application_tables == CURRENT_TABLES or application_tables == HEAD_TABLES
+    ) and user_version == 1:
+        if application_tables == HEAD_TABLES:
+            revision = HEAD_REVISION
+        elif "telegram_message_mappings_mapping_id" in indexes:
+            revision = INDEX_REVISION
+        else:
+            revision = CURRENT_REVISION
         command.stamp(config, revision)
     else:
         raise RuntimeError(

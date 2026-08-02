@@ -13,6 +13,7 @@ from src.bus import message_bus
 from src.forwarding import (
     abandon_onebot_forward,
     begin_onebot_forward,
+    onebot_essence_task,
     onebot_forward_task,
     onebot_group_ban_task,
     onebot_group_member_task,
@@ -22,7 +23,9 @@ from src.forwarding import (
 )
 from src.log import qlog
 from src.messages import (
+    ONEBOT_USER_NAME,
     OneBotConnectionError,
+    OneBotEssenceEvent,
     OneBotGroupBanEvent,
     OneBotGroupMemberEvent,
     OneBotMessage,
@@ -104,6 +107,14 @@ class QGateway:
         """调用 OneBot delete_msg 撤回指定消息。"""
         await self._call_action("delete_msg", {"message_id": message_id})
 
+    async def set_essence_message(self, message_id: int) -> None:
+        """将指定 OneBot 消息设为精华消息。"""
+        await self._call_action("set_essence_msg", {"message_id": message_id})
+
+    async def delete_essence_message(self, message_id: int) -> None:
+        """将指定 OneBot 消息移出精华消息。"""
+        await self._call_action("delete_essence_msg", {"message_id": message_id})
+
     async def get_group_member_info(
         self,
         group_id: int,
@@ -126,6 +137,17 @@ class QGateway:
         if not isinstance(data, dict):
             raise TypeError(f"OneBot 群成员响应缺少 data: {response!r}")
         return data
+
+    async def get_forward_messages(self, forward_id: str) -> list[dict[str, Any]]:
+        """调用 get_forward_msg，并返回经过外壳校验的合并转发消息。"""
+        response = await self._call_action("get_forward_msg", {"id": forward_id})
+        data = response.get("data")
+        messages = data.get("messages") if isinstance(data, dict) else None
+        if not isinstance(messages, list) or not all(
+            isinstance(message, dict) for message in messages
+        ):
+            raise TypeError(f"OneBot 合并转发响应缺少 messages: {response!r}")
+        return messages
 
     async def _call_action(
         self,
@@ -203,7 +225,7 @@ def _sender_name(data: dict[Any, Any], user_id: int) -> tuple[str, bool]:
         nickname = _nonempty_string(sender.get("nickname"))
         if nickname is not None:
             return nickname, False
-    return f"OneBot 用户 {user_id}", True
+    return f"{ONEBOT_USER_NAME} {user_id}", True
 
 
 def _normalize_segments(value: Any) -> list[dict[str, Any]] | None:
@@ -267,6 +289,36 @@ async def _receive_group_ban_notice(
             q_gateway,
             q_group_id=group_id,
             text="群禁言事件发送到 Telegram 失败：事件队列已满。",
+        )
+
+
+async def _receive_essence_notice(
+    data: dict[Any, Any],
+    bot: ExtBot[None],
+) -> None:
+    """校验精华消息事件并投递到 Telegram 事件队列。"""
+    group_id = _onebot_int(data.get("group_id"))
+    message_id = _onebot_int(data.get("message_id"))
+    sub_type = data.get("sub_type")
+    if group_id is None or message_id is None or sub_type not in {"add", "delete"}:
+        qlog.warning("丢弃字段不规范的 OneBot 精华消息事件")
+        return
+    accepted = message_bus.put_nowait(
+        onebot_essence_task(
+            OneBotEssenceEvent(
+                group_id=group_id,
+                message_id=message_id,
+                added=sub_type == "add",
+            ),
+            bot,
+        )
+    )
+    if not accepted:
+        qlog.error("事件队列已满，丢弃 OneBot 精华消息事件: %s", message_id)
+        enqueue_onebot_notice(
+            q_gateway,
+            q_group_id=group_id,
+            text="精华消息状态同步到 Telegram 失败：事件队列已满。",
         )
 
 
@@ -385,6 +437,7 @@ async def _receive_notify_notice(
 
 NoticeHandler = Callable[[dict[Any, Any], ExtBot[None]], Awaitable[None]]
 NOTICE_HANDLERS: dict[str, NoticeHandler] = {
+    "essence": _receive_essence_notice,
     "group_ban": _receive_group_ban_notice,
     "group_decrease": _receive_group_decrease_notice,
     "group_increase": _receive_group_increase_notice,

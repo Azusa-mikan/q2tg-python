@@ -17,6 +17,7 @@ BOT_COMMANDS = (
     BotCommand("forward", "查看或设置 Telegram 到 Onebot 转发"),
     BotCommand("id_show", "查看或设置 Onebot 用户 ID 显示"),
     BotCommand("undo", "撤回所回复消息的双侧副本"),
+    BotCommand("unpin", "取消所回复消息的置顶和精华"),
 )
 
 

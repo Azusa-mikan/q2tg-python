@@ -36,6 +36,8 @@ dependencies = [
     "python-telegram-bot==22.8",
     # 多数据库异步数据访问和跨方言 schema。
     "sqlalchemy==2.0.51",
+    # 创建 Telegraph 页面并引用合并转发中的原始媒体 URL。
+    "telegraph[aio]==2.2.0",
     # FastAPI 的 ASGI 服务器，由 main.py 启动。
     "uvicorn==0.52.0",
     # Uvicorn 的 WebSocket 协议实现依赖。
