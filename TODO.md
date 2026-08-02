@@ -30,13 +30,14 @@
   - 用户在 Telegram 回复目标消息后使用 `/undo` 发起
   - 命令会撤回 Telegram 和 OneBot 两侧的对应消息
   - Onebot 侧正常撤回即可
+- 小表情（QFace）- 使用 [Q2TG](https://github.com/clansty/Q2TG) 的[实现](https://github.com/clansty/Q2TG/blob/sleepyfox/main/src/constants/qfaceChannelMap.ts)
+- 超级表情 - [同上](https://github.com/clansty/Q2TG/blob/sleepyfox/main/src/constants/lottie.ts)
 
 Telegram 媒体组最多支持 10 项、合计 100 MB；其中每项仍受 20 MB 上限限制。
 
 # 待支持消息类型
 
 - 闪照
-- 小表情（Q Face）
 - 合并转发
 - 精华消息（TG的置顶消息）
   - 不保证其它 Onebot 实现支持（反正 SnowLuma 支持）

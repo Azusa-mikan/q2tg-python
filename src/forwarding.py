@@ -17,11 +17,19 @@ from telegram import (
     InputMediaPhoto,
     ReplyParameters,
 )
+from telegram.constants import ParseMode
 from telegram.error import TimedOut
 from telegram.ext import ExtBot
+from telegram.helpers import escape_markdown
 
 from src.audio import normalize_onebot_record
 from src.config import config
+from src.face import (
+    normalize_onebot_face_message,
+    onebot_super_face_file_id,
+    onebot_super_face_id,
+    render_onebot_face,
+)
 from src.log import baselog
 from src.media import MediaFile, media_cache, media_queue_budget
 from src.messages import (
@@ -98,8 +106,9 @@ async def onebot_message_text(
     *,
     id_show_enabled: bool = False,
     member_names: dict[int, str | None] | None = None,
+    markdown_v2: bool = False,
 ) -> str:
-    """按原顺序拼接 text 和可见的 at segment。"""
+    """按原顺序拼接 text、face 和可见的 at segment。"""
     if member_names is None:
         member_names = {}
     user_ids: list[int] = []
@@ -108,7 +117,11 @@ async def onebot_message_text(
             continue
         data = segment.get("data")
         user_id = _onebot_at_user_id(data.get("qq")) if isinstance(data, dict) else None
-        if user_id is not None and user_id not in member_names and user_id not in user_ids:
+        if (
+            user_id is not None
+            and user_id not in member_names
+            and user_id not in user_ids
+        ):
             user_ids.append(user_id)
     if user_ids:
         names = await asyncio.gather(
@@ -123,7 +136,12 @@ async def onebot_message_text(
         if kind == "text":
             text = data.get("text") if isinstance(data, dict) else None
             if isinstance(text, str):
-                parts.append(text)
+                parts.append(escape_markdown(text, version=2) if markdown_v2 else text)
+            continue
+        if kind == "face" and isinstance(data, dict):
+            face_id = data.get("id")
+            if face_id is not None:
+                parts.append(render_onebot_face(face_id))
             continue
         if kind != "at" or not isinstance(data, dict):
             continue
@@ -139,7 +157,8 @@ async def onebot_message_text(
             mention = f"{name}[{user_id}]" if id_show_enabled else name
         else:
             mention = str(user_id) if id_show_enabled else "Onebot用户"
-        parts.append(f"@{mention}")
+        mention = f"@{mention}"
+        parts.append(escape_markdown(mention, version=2) if markdown_v2 else mention)
     return "".join(parts)
 
 
@@ -251,11 +270,16 @@ async def download_media(
         try:
             async with client.stream("GET", url) as response:
                 response.raise_for_status()
-                response_type = response.headers.get("content-type", "").partition(";")[0]
+                response_type = response.headers.get("content-type", "").partition(";")[
+                    0
+                ]
                 if response_type:
                     media.media_type = response_type
                 content_length = response.headers.get("content-length")
-                if content_length is not None and int(content_length) > ONEBOT_MEDIA_LIMIT:
+                if (
+                    content_length is not None
+                    and int(content_length) > ONEBOT_MEDIA_LIMIT
+                ):
                     raise MediaTooLargeError("Onebot 媒体超过 20 MB，无法转发")
                 async for chunk in response.aiter_bytes(DOWNLOAD_CHUNK_SIZE):
                     if media.size + len(chunk) > ONEBOT_MEDIA_LIMIT:
@@ -300,23 +324,30 @@ async def forward_onebot_to_telegram(
         return
     msg.tg_chat_id = group_id
 
+    normalized_message = normalize_onebot_face_message(msg.message)
+    super_face_id = onebot_super_face_id(normalized_message)
+
     sender_name = msg.sender_name
-    has_mentions = any(segment.get("type") == "at" for segment in msg.message)
+    has_mentions = any(segment.get("type") == "at" for segment in normalized_message)
     id_show_enabled = (
         bool(await sql.get_id_show_enabled(group_id))
         if msg.sender_name_is_fallback or has_mentions
         else False
     )
+    has_faces = any(segment.get("type") == "face" for segment in normalized_message)
     text = await onebot_message_text(
-        msg.message,
+        normalized_message,
         msg.group_id,
         gateway,
         id_show_enabled=id_show_enabled,
         member_names=msg.mention_names,
+        markdown_v2=has_faces,
     )
     if msg.sender_name_is_fallback and not id_show_enabled:
         sender_name = "OneBot 用户"
-    media, unavailable = onebot_message_media(msg.message)
+    if has_faces and super_face_id is None:
+        sender_name = escape_markdown(sender_name, version=2)
+    media, unavailable = onebot_message_media(normalized_message)
     if not text and not media and not unavailable:
         baselog.warning("OneBot 消息没有可转发的内容: %s", msg.message_id)
         return
@@ -338,8 +369,39 @@ async def forward_onebot_to_telegram(
                 allow_sending_without_reply=True,
             )
 
-    if not media:
-        await _send_text_chunks(msg, bot, group_id, caption, reply_parameters)
+    if super_face_id is not None:
+        sticker_file_id = await onebot_super_face_file_id(bot, super_face_id)
+        if sticker_file_id is not None:
+            if not msg.tg_message_ids:
+                sent_header = await bot.send_message(
+                    chat_id=group_id,
+                    text=f"{sender_name}:",
+                    reply_parameters=reply_parameters,
+                )
+                msg.tg_message_ids.append(sent_header.message_id)
+            sent_sticker = await bot.send_sticker(
+                chat_id=group_id,
+                sticker=sticker_file_id,
+            )
+            msg.tg_message_ids.append(sent_sticker.message_id)
+        else:
+            await _send_text_chunks(
+                msg,
+                bot,
+                group_id,
+                caption,
+                reply_parameters,
+                parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
+            )
+    elif not media:
+        await _send_text_chunks(
+            msg,
+            bot,
+            group_id,
+            caption,
+            reply_parameters,
+            parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
+        )
     elif (
         msg.next_media_index == 0
         and 2 <= len(media) <= 10
@@ -351,6 +413,7 @@ async def forward_onebot_to_telegram(
             group_id,
             caption,
             reply_parameters,
+            parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
         )
         contents: list[MediaFile] = []
         try:
@@ -375,6 +438,7 @@ async def forward_onebot_to_telegram(
                     contents,
                     media_caption,
                     media_reply,
+                    ParseMode.MARKDOWN_V2 if has_faces else None,
                 )
             elif as_photos:
                 album = [
@@ -386,6 +450,7 @@ async def forward_onebot_to_telegram(
                             read_file_handle=False,
                         ),
                         caption=media_caption if index == 0 else None,
+                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
                         show_caption_above_media=index == 0,
                     )
                     for index, (content, (_, _, filename)) in enumerate(
@@ -402,6 +467,7 @@ async def forward_onebot_to_telegram(
                             read_file_handle=False,
                         ),
                         caption=media_caption if index == len(contents) - 1 else None,
+                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
                     )
                     for index, (content, (_, _, filename)) in enumerate(
                         zip(contents, media, strict=True)
@@ -425,6 +491,7 @@ async def forward_onebot_to_telegram(
             group_id,
             caption,
             reply_parameters,
+            parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
         )
         for index in range(msg.next_media_index, len(media)):
             kind, url, filename = media[index]
@@ -455,6 +522,7 @@ async def forward_onebot_to_telegram(
                         chat_id=group_id,
                         voice=upload,
                         caption=item_caption,
+                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
                         reply_parameters=item_reply,
                     )
                 elif is_gif:
@@ -462,6 +530,7 @@ async def forward_onebot_to_telegram(
                         chat_id=group_id,
                         animation=upload,
                         caption=item_caption,
+                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
                         show_caption_above_media=True,
                         reply_parameters=item_reply,
                     )
@@ -470,6 +539,7 @@ async def forward_onebot_to_telegram(
                         chat_id=group_id,
                         photo=upload,
                         caption=item_caption,
+                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
                         show_caption_above_media=True,
                         reply_parameters=item_reply,
                     )
@@ -478,6 +548,7 @@ async def forward_onebot_to_telegram(
                         chat_id=group_id,
                         video=upload,
                         caption=item_caption,
+                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
                         show_caption_above_media=True,
                         supports_streaming=True,
                         reply_parameters=item_reply,
@@ -487,6 +558,7 @@ async def forward_onebot_to_telegram(
                         chat_id=group_id,
                         document=upload,
                         caption=item_caption,
+                        parse_mode=ParseMode.MARKDOWN_V2 if has_faces else None,
                         reply_parameters=item_reply,
                     )
                 msg.tg_message_ids.append(sent.message_id)
@@ -647,9 +719,7 @@ async def forward_onebot_poke_to_telegram(
         return
     show_id = bool(await sql.get_id_show_enabled(tg_chat_id))
     if event.user_id == event.target_id:
-        user_name = await _onebot_member_name(
-            gateway, event.group_id, event.user_id
-        )
+        user_name = await _onebot_member_name(gateway, event.group_id, event.user_id)
         target_name = None
     else:
         user_name, target_name = await asyncio.gather(
@@ -743,13 +813,16 @@ async def _send_downloaded_media_individually(
     contents: list[MediaFile],
     caption: str | None,
     reply_parameters: ReplyParameters | None,
+    parse_mode: ParseMode | None,
 ) -> None:
     """按原顺序发送不能组成 Telegram 媒体组的已下载媒体。"""
     for index, (content, (kind, _, filename)) in enumerate(
         zip(contents, media, strict=True)
     ):
         is_gif = kind == "image" and _is_gif(content)
-        upload_filename = f"{Path(filename).stem or 'animation'}.gif" if is_gif else filename
+        upload_filename = (
+            f"{Path(filename).stem or 'animation'}.gif" if is_gif else filename
+        )
         upload = InputFile(
             content.file,
             filename=upload_filename,
@@ -762,6 +835,7 @@ async def _send_downloaded_media_individually(
                 chat_id=group_id,
                 animation=upload,
                 caption=media_caption,
+                parse_mode=parse_mode,
                 show_caption_above_media=True,
                 reply_parameters=media_reply,
             )
@@ -770,6 +844,7 @@ async def _send_downloaded_media_individually(
                 chat_id=group_id,
                 photo=upload,
                 caption=media_caption,
+                parse_mode=parse_mode,
                 show_caption_above_media=True,
                 reply_parameters=media_reply,
             )
@@ -778,6 +853,7 @@ async def _send_downloaded_media_individually(
                 chat_id=group_id,
                 document=upload,
                 caption=media_caption,
+                parse_mode=parse_mode,
                 reply_parameters=media_reply,
             )
         msg.tg_message_ids.append(sent.message_id)
@@ -790,10 +866,19 @@ async def _prepare_media_caption(
     group_id: int,
     caption: str,
     reply_parameters: ReplyParameters | None,
+    *,
+    parse_mode: ParseMode | None,
 ) -> tuple[str | None, ReplyParameters | None]:
     if _utf16_length(caption) <= TELEGRAM_CAPTION_LIMIT:
         return caption, reply_parameters
-    await _send_text_chunks(msg, bot, group_id, caption, reply_parameters)
+    await _send_text_chunks(
+        msg,
+        bot,
+        group_id,
+        caption,
+        reply_parameters,
+        parse_mode=parse_mode,
+    )
     return None, None
 
 
@@ -803,13 +888,19 @@ async def _send_text_chunks(
     group_id: int,
     text: str,
     reply_parameters: ReplyParameters | None,
+    *,
+    parse_mode: ParseMode | None = None,
 ) -> None:
     chunks = _split_telegram_text(text)
     for index in range(msg.next_text_chunk_index, len(chunks)):
+        send_options: dict[str, Any] = {}
+        if parse_mode is not None:
+            send_options["parse_mode"] = parse_mode
         sent = await bot.send_message(
             chat_id=group_id,
             text=chunks[index],
             reply_parameters=reply_parameters if index == 0 else None,
+            **send_options,
         )
         msg.tg_message_ids.append(sent.message_id)
         msg.next_text_chunk_index = index + 1
@@ -878,9 +969,11 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
         else:
             batches = [[text_segment, *media_segments]]
     else:
-        batches = [[
-            {"type": "text", "data": {"text": text}},
-        ]]
+        batches = [
+            [
+                {"type": "text", "data": {"text": text}},
+            ]
+        ]
 
     if msg.reply_message_id is not None:
         reply_mapping = await sql.get_q_message(msg.group_id, msg.reply_message_id)

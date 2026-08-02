@@ -466,6 +466,15 @@ uv run --locked ruff check .
 uv run --locked python -m compileall -q main.py src tests
 ```
 
+## 鸣谢
+
+- [Q2TG](https://github.com/clansty/Q2TG)：本项目的小表情频道映射与超级表情
+  Telegram Sticker Pack 映射参考了其
+  [QFace 实现](https://github.com/clansty/Q2TG/blob/sleepyfox/main/src/constants/qfaceChannelMap.ts)
+  和[超级表情实现](https://github.com/clansty/Q2TG/blob/sleepyfox/main/src/constants/lottie.ts)。
+- [SnowLuma](https://github.com/SnowLuma/SnowLuma)：提供本项目主要开发与测试使用的
+  OneBot 11 实现。
+
 ## 许可证
 
 本项目基于 [GNU General Public License v3.0 or later](LICENSE) 开源。
