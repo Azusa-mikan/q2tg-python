@@ -251,6 +251,45 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         assert mapping is not None
         self.assertEqual(mapping.tg_message_ids, (201,))
 
+    async def test_onebot_video_with_existing_mapping_is_not_sent_again(self) -> None:
+        await self.database.set_message_mapping(
+            q_group_id=123,
+            q_message_ids=(-101,),
+            tg_chat_id=-456,
+            tg_message_ids=(201,),
+        )
+        bot = SimpleNamespace(send_video=AsyncMock(), send_document=AsyncMock())
+        message = OneBotMessage(
+            message_id=-101,
+            group_id=123,
+            user_id=1,
+            sender_name="OneBot User",
+            message=[
+                {
+                    "type": "video",
+                    "data": {
+                        "file": "clip.mp4",
+                        "url": "https://example.test/video",
+                    },
+                }
+            ],
+        )
+
+        async with httpx.AsyncClient() as client:
+            with (
+                patch("src.forwarding.sql", self.database),
+                patch("src.forwarding.download_media", new_callable=AsyncMock) as download,
+            ):
+                await forward_onebot_to_telegram(
+                    message,
+                    cast(ExtBot[None], bot),
+                    client,
+                )
+
+        download.assert_not_awaited()
+        bot.send_video.assert_not_awaited()
+        bot.send_document.assert_not_awaited()
+
     async def test_fake_mp4_is_sent_as_document(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(

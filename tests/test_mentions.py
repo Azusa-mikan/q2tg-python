@@ -114,8 +114,8 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("src.forwarding.baselog.warning") as warning:
             text = await onebot_message_text(
-                [{"type": "at", "data": {"qq": "10002"}}],
-                123456789,
+                [{"type": "at", "data": {"qq": "102"}}],
+                123,
                 cast(QGateway, gateway),
             )
 
@@ -130,13 +130,13 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         text = await onebot_message_text(
-            [{"type": "at", "data": {"qq": "10001"}}],
-            123456789,
+            [{"type": "at", "data": {"qq": "101"}}],
+            123,
             cast(QGateway, gateway),
             id_show_enabled=True,
         )
 
-        self.assertEqual(text, "@测试用户[10001]")
+        self.assertEqual(text, "@测试用户[101]")
 
     async def test_id_show_uses_qq_number_as_fallback(self) -> None:
         gateway = SimpleNamespace(
@@ -145,13 +145,13 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("src.forwarding.baselog.warning"):
             text = await onebot_message_text(
-                [{"type": "at", "data": {"qq": "10001"}}],
-                123456789,
+                [{"type": "at", "data": {"qq": "101"}}],
+                123,
                 cast(QGateway, gateway),
                 id_show_enabled=True,
             )
 
-        self.assertEqual(text, "@10001")
+        self.assertEqual(text, "@101")
 
     async def test_onebot_mention_is_visible_in_telegram_message(self) -> None:
         bot = SimpleNamespace(
@@ -168,13 +168,18 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
             user_id=1,
             sender_name="OneBot User",
             message=[
-                {"type": "at", "data": {"qq": "10002"}},
+                {"type": "at", "data": {"qq": "102"}},
                 {"type": "text", "data": {"text": " "}},
             ],
         )
 
         async with httpx.AsyncClient() as client:
             with (
+                patch(
+                    "src.forwarding.sql.get_tg_message",
+                    new_callable=AsyncMock,
+                    return_value=None,
+                ),
                 patch("src.forwarding.sql.get_tg_group", new_callable=AsyncMock, return_value=-456),
                 patch(
                     "src.forwarding.sql.get_id_show_enabled",

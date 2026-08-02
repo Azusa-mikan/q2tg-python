@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from src.bus import MessageBus, message_bus
 from src.log import baselog
-from src.messages import SendTarget, SendTask
+from src.messages import SendLane, SendTarget, SendTask
 
 if TYPE_CHECKING:
     from src.qbot import QGateway
@@ -25,6 +25,7 @@ def telegram_notice_task(
 
     return SendTask(
         target=SendTarget.TELEGRAM,
+        lane=SendLane.SYSTEM,
         send=send_notice,
         label=label,
     )
@@ -47,6 +48,7 @@ def onebot_notice_task(
 
     return SendTask(
         target=SendTarget.ONEBOT,
+        lane=SendLane.SYSTEM,
         send=send_notice,
         label=label,
     )

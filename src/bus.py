@@ -7,7 +7,7 @@ from asyncio import Queue, QueueFull
 from dataclasses import dataclass
 
 from src.log import baselog
-from src.messages import FailureAction, SendTarget, SendTask
+from src.messages import FailureAction, SendLane, SendTarget, SendTask
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,33 +29,45 @@ class MessageBus:
     def __init__(self, maxsize: int = 100) -> None:
         self.onebot_queue: Queue[QueueItem] = Queue(maxsize=maxsize)
         self.telegram_queue: Queue[QueueItem] = Queue(maxsize=maxsize)
+        self.onebot_event_queue: Queue[QueueItem] = Queue(maxsize=maxsize)
+        self.telegram_event_queue: Queue[QueueItem] = Queue(maxsize=maxsize)
+        self.onebot_system_queue: Queue[QueueItem] = Queue(maxsize=maxsize)
+        self.telegram_system_queue: Queue[QueueItem] = Queue(maxsize=maxsize)
         # 重试队列是目标队列之间的内部调度通道，不接收外部流量。保持无界可避免
         # “目标队列满、worker 等重试槽、dispatcher 又等目标槽”的循环背压。
         self.retry_queue: Queue[SendTask | Shutdown] = Queue()
 
     async def put(self, task: SendTask) -> None:
         """按任务目标路由，并对异步生产者施加背压。"""
-        await self._target_queue(task.target).put(task)
+        await self._target_queue(task.target, task.lane).put(task)
 
     def put_nowait(self, task: SendTask) -> bool:
         """按任务目标立即入队；满队列时返回 False。"""
         try:
-            self._target_queue(task.target).put_nowait(task)
+            self._target_queue(task.target, task.lane).put_nowait(task)
         except QueueFull:
             return False
         return True
 
-    async def stop_consumer(self, target: SendTarget) -> None:
-        """把停止信号放到指定目标队列尾部。"""
-        await self._target_queue(target).put(SHUTDOWN)
+    async def stop_consumer(
+        self,
+        target: SendTarget,
+        lane: SendLane = SendLane.MESSAGE,
+    ) -> None:
+        """把停止信号放到指定目标和 lane 的队列尾部。"""
+        await self._target_queue(target, lane).put(SHUTDOWN)
 
     async def stop_retry_dispatcher(self) -> None:
         """在应用关闭时停止重试调度器。"""
         await self.retry_queue.put(SHUTDOWN)
 
-    async def join(self, target: SendTarget) -> None:
-        """等待目标队列及其可能产生的重试任务稳定排空。"""
-        queue = self._target_queue(target)
+    async def join(
+        self,
+        target: SendTarget,
+        lane: SendLane = SendLane.MESSAGE,
+    ) -> None:
+        """等待指定目标和 lane 及其可能产生的重试任务稳定排空。"""
+        queue = self._target_queue(target, lane)
         while True:
             await queue.join()
             await self.retry_queue.join()
@@ -77,9 +89,13 @@ class MessageBus:
             finally:
                 self.retry_queue.task_done()
 
-    async def consume(self, target: SendTarget) -> None:
-        """消费一个目标平台的通用任务；DEFER 会保留任务并结束当前消费者。"""
-        queue = self._target_queue(target)
+    async def consume(
+        self,
+        target: SendTarget,
+        lane: SendLane = SendLane.MESSAGE,
+    ) -> None:
+        """消费一个目标平台 lane 的任务；DEFER 会保留任务并结束当前消费者。"""
+        queue = self._target_queue(target, lane)
         while True:
             item = await queue.get()
             requeued = False
@@ -144,12 +160,26 @@ class MessageBus:
         except Exception:  # noqa: BLE001
             baselog.exception("发送任务资源清理失败: %s", task.label)
 
-    def _target_queue(self, target: SendTarget) -> Queue[QueueItem]:
+    def _target_queue(
+        self,
+        target: SendTarget,
+        lane: SendLane,
+    ) -> Queue[QueueItem]:
         if target is SendTarget.ONEBOT:
-            return self.onebot_queue
+            if lane is SendLane.MESSAGE:
+                return self.onebot_queue
+            if lane is SendLane.EVENT:
+                return self.onebot_event_queue
+            if lane is SendLane.SYSTEM:
+                return self.onebot_system_queue
         if target is SendTarget.TELEGRAM:
-            return self.telegram_queue
-        raise ValueError(f"未知发送目标: {target!r}")
+            if lane is SendLane.MESSAGE:
+                return self.telegram_queue
+            if lane is SendLane.EVENT:
+                return self.telegram_event_queue
+            if lane is SendLane.SYSTEM:
+                return self.telegram_system_queue
+        raise ValueError(f"未知发送目标或 lane: {target!r}, {lane!r}")
 
 
 message_bus = MessageBus()

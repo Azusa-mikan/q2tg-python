@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import WebSocket, WebSocketDisconnect
 
-from src.messages import SendTarget
+from src.messages import SendLane, SendTarget
 from src.ws import snowluma_ws
 
 
@@ -43,10 +43,13 @@ class WebSocketLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(websocket.accepted)
         run.assert_awaited_once_with()
         stop.assert_awaited_once_with()
-        self.assertEqual(consume.call_count, 2)
-        consume.assert_any_call(SendTarget.ONEBOT)
-        consume.assert_any_call(SendTarget.TELEGRAM)
-        stop_consumer.assert_awaited_once_with(SendTarget.TELEGRAM)
+        self.assertEqual(consume.call_count, 6)
+        for target in SendTarget:
+            for lane in SendLane:
+                consume.assert_any_call(target, lane)
+        self.assertEqual(stop_consumer.await_count, 3)
+        for lane in SendLane:
+            stop_consumer.assert_any_await(SendTarget.TELEGRAM, lane)
         shutdown.assert_awaited_once_with()
         self.assertEqual(client.call_count, 2)
         self.assertEqual(

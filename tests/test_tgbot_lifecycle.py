@@ -13,6 +13,8 @@ class TGBotLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def test_proxy_is_applied_to_bot_api_and_polling(self) -> None:
         builder = MagicMock()
         builder.token.return_value = builder
+        builder.media_write_timeout.return_value = builder
+        builder.read_timeout.return_value = builder
         builder.proxy.return_value = builder
         builder.get_updates_proxy.return_value = builder
         built_app = MagicMock()
@@ -27,6 +29,8 @@ class TGBotLifecycleTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIs(result, built_app)
+        builder.media_write_timeout.assert_called_once_with(120)
+        builder.read_timeout.assert_called_once_with(60)
         builder.proxy.assert_called_once_with("http://127.0.0.1:8080")
         builder.get_updates_proxy.assert_called_once_with("http://127.0.0.1:8080")
 

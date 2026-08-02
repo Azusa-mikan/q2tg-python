@@ -54,16 +54,16 @@ class BindingNoticeTests(unittest.IsolatedAsyncioTestCase):
 
         telegram_tasks = []
         onebot_tasks = []
-        while not bus.telegram_queue.empty():
-            task = await bus.telegram_queue.get()
+        while not bus.telegram_system_queue.empty():
+            task = await bus.telegram_system_queue.get()
             assert isinstance(task, SendTask)
             telegram_tasks.append(task)
-            bus.telegram_queue.task_done()
-        while not bus.onebot_queue.empty():
-            task = await bus.onebot_queue.get()
+            bus.telegram_system_queue.task_done()
+        while not bus.onebot_system_queue.empty():
+            task = await bus.onebot_system_queue.get()
             assert isinstance(task, SendTask)
             onebot_tasks.append(task)
-            bus.onebot_queue.task_done()
+            bus.onebot_system_queue.task_done()
         for task in telegram_tasks + onebot_tasks:
             await task.send()
 

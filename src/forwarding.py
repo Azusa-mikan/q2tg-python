@@ -17,6 +17,7 @@ from telegram import (
     InputMediaPhoto,
     ReplyParameters,
 )
+from telegram.error import TimedOut
 from telegram.ext import ExtBot
 
 from src.audio import normalize_onebot_record
@@ -27,8 +28,12 @@ from src.messages import (
     FailureAction,
     MediaTooLargeError,
     OneBotConnectionError,
+    OneBotGroupBanEvent,
+    OneBotGroupMemberEvent,
     OneBotMessage,
+    OneBotPokeEvent,
     OneBotSendError,
+    SendLane,
     SendTarget,
     SendTask,
     TelegramMessage,
@@ -54,6 +59,36 @@ MAX_SEND_ATTEMPTS = 3
 TELEGRAM_VIDEO_LIMIT = 20_000_000
 TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_TEXT_LIMIT = 4096
+
+# 普通转发和撤回由不同消费者执行。这里记录尚未结束的 OneBot 消息，防止撤回
+# 事件任务在普通转发保存映射前查询数据库并错误地当作未命中。
+_active_onebot_forwards: set[tuple[int, int]] = set()
+_pending_onebot_recalls: set[tuple[int, int]] = set()
+
+
+def begin_onebot_forward(q_group_id: int, q_message_id: int) -> bool:
+    """标记 OneBot 消息已进入普通转发队列；重复在途消息返回 False。"""
+    key = (q_group_id, q_message_id)
+    if key in _active_onebot_forwards:
+        return False
+    _active_onebot_forwards.add(key)
+    return True
+
+
+def request_onebot_recall(q_group_id: int, q_message_id: int) -> bool:
+    """若消息仍在转发则登记待撤回，并返回 True。"""
+    key = (q_group_id, q_message_id)
+    if key not in _active_onebot_forwards:
+        return False
+    _pending_onebot_recalls.add(key)
+    return True
+
+
+def abandon_onebot_forward(q_group_id: int, q_message_id: int) -> None:
+    """入口未能入队时清除在途标记。"""
+    key = (q_group_id, q_message_id)
+    _active_onebot_forwards.discard(key)
+    _pending_onebot_recalls.discard(key)
 
 
 async def onebot_message_text(
@@ -124,12 +159,21 @@ async def _onebot_member_name(
     gateway: QGateway | None,
     group_id: int,
     user_id: int,
+    *,
+    no_cache: bool = False,
 ) -> str | None:
     """查询 at 对象的可见名称，失败时返回 None 交给格式层兜底。"""
     if gateway is None:
         return None
     try:
-        member = await gateway.get_group_member_info(group_id, user_id)
+        if no_cache:
+            member = await gateway.get_group_member_info(
+                group_id,
+                user_id,
+                no_cache=True,
+            )
+        else:
+            member = await gateway.get_group_member_info(group_id, user_id)
     except Exception:  # noqa: BLE001
         baselog.warning(
             "OneBot 群成员信息查询失败: group=%s user=%s",
@@ -243,10 +287,18 @@ async def forward_onebot_to_telegram(
     gateway: QGateway | None = None,
 ) -> None:
     """将 OneBot 文本和图片按顺序发送到绑定的 Telegram 群。"""
+    if await sql.get_tg_message(msg.group_id, msg.message_id) is not None:
+        baselog.warning(
+            "忽略已有 Telegram 映射的重复 OneBot 消息: group=%s message=%s",
+            msg.group_id,
+            msg.message_id,
+        )
+        return
     group_id = await sql.get_tg_group(msg.group_id)
     if group_id is None:
         baselog.warning("OneBot 群未配置转发目标: %s", msg.group_id)
         return
+    msg.tg_chat_id = group_id
 
     sender_name = msg.sender_name
     has_mentions = any(segment.get("type") == "at" for segment in msg.message)
@@ -453,6 +505,234 @@ async def forward_onebot_to_telegram(
         )
     except Exception:  # noqa: BLE001
         baselog.exception("Telegram 消息发送成功，但消息映射保存失败")
+
+
+async def recall_onebot_message_from_telegram(
+    q_group_id: int,
+    q_message_id: int,
+    bot: ExtBot[None],
+    *,
+    tg_chat_id: int | None = None,
+    tg_message_ids: tuple[int, ...] = (),
+) -> None:
+    """根据 OneBot 消息映射删除 Telegram 侧的全部副本。"""
+    if tg_chat_id is None or not tg_message_ids:
+        mapping = await sql.get_tg_message(q_group_id, q_message_id)
+        if mapping is None:
+            baselog.warning(
+                "OneBot 撤回事件没有可用的 Telegram 消息映射: group=%s message=%s",
+                q_group_id,
+                q_message_id,
+            )
+            return
+        tg_chat_id = mapping.tg_chat_id
+        tg_message_ids = mapping.tg_message_ids
+    for index in range(0, len(tg_message_ids), 100):
+        await bot.delete_messages(
+            chat_id=tg_chat_id,
+            message_ids=tg_message_ids[index : index + 100],
+        )
+
+
+def format_duration(seconds: int) -> str:
+    """把非负秒数缩放为天、小时、分钟和秒的中文组合。"""
+    units = ((86_400, "天"), (3_600, "小时"), (60, "分钟"), (1, "秒"))
+    parts: list[str] = []
+    remainder = seconds
+    for unit_seconds, label in units:
+        value, remainder = divmod(remainder, unit_seconds)
+        if value:
+            parts.append(f"{value} {label}")
+    return " ".join(parts) or "0 秒"
+
+
+def _event_member_text(name: str | None, user_id: int, *, show_id: bool) -> str:
+    if name is None:
+        return str(user_id) if show_id else "OneBot用户"
+    return f"{name}[{user_id}]" if show_id else name
+
+
+async def forward_onebot_group_ban_to_telegram(
+    event: OneBotGroupBanEvent,
+    bot: ExtBot[None],
+    gateway: QGateway,
+) -> None:
+    """把 OneBot 群禁言事件格式化为 Telegram 文本消息。"""
+    tg_chat_id = await sql.get_tg_group(event.group_id)
+    if tg_chat_id is None:
+        baselog.warning("OneBot 群事件未配置转发目标: %s", event.group_id)
+        return
+    show_id = bool(await sql.get_id_show_enabled(tg_chat_id))
+    user_name, operator_name = await asyncio.gather(
+        _onebot_member_name(gateway, event.group_id, event.user_id),
+        _onebot_member_name(gateway, event.group_id, event.operator_id),
+    )
+    user = _event_member_text(user_name, event.user_id, show_id=show_id)
+    operator = _event_member_text(
+        operator_name,
+        event.operator_id,
+        show_id=show_id,
+    )
+    if event.lifted:
+        text = f"{user} 被管理员 {operator} 解除禁言"
+    else:
+        text = f"{user} 被管理员 {operator} 禁言 {format_duration(event.duration)}"
+    await bot.send_message(chat_id=tg_chat_id, text=text)
+
+
+def onebot_group_ban_task(
+    event: OneBotGroupBanEvent,
+    bot: ExtBot[None],
+    gateway: QGateway,
+) -> SendTask:
+    """创建发送到 Telegram 事件队列的群禁言任务。"""
+    return SendTask(
+        target=SendTarget.TELEGRAM,
+        lane=SendLane.EVENT,
+        send=partial(forward_onebot_group_ban_to_telegram, event, bot, gateway),
+        failure_action=_telegram_failure_action,
+        max_attempts=MAX_SEND_ATTEMPTS,
+        label=f"onebot-group-ban:{event.group_id}:{event.user_id}",
+    )
+
+
+async def forward_onebot_group_member_to_telegram(
+    event: OneBotGroupMemberEvent,
+    bot: ExtBot[None],
+    gateway: QGateway,
+) -> None:
+    """把 OneBot 群成员加入或退出事件格式化为 Telegram 文本消息。"""
+    tg_chat_id = await sql.get_tg_group(event.group_id)
+    if tg_chat_id is None:
+        baselog.warning("OneBot 群事件未配置转发目标: %s", event.group_id)
+        return
+    show_id = bool(await sql.get_id_show_enabled(tg_chat_id))
+    name = await _onebot_member_name(
+        gateway,
+        event.group_id,
+        event.user_id,
+        no_cache=event.joined,
+    )
+    user = _event_member_text(name, event.user_id, show_id=show_id)
+    action = "加入群聊" if event.joined else "退出群聊"
+    await bot.send_message(chat_id=tg_chat_id, text=f"{user} {action}")
+
+
+def onebot_group_member_task(
+    event: OneBotGroupMemberEvent,
+    bot: ExtBot[None],
+    gateway: QGateway,
+) -> SendTask:
+    """创建发送到 Telegram 事件队列的群成员变动任务。"""
+    action = "increase" if event.joined else "decrease"
+    return SendTask(
+        target=SendTarget.TELEGRAM,
+        lane=SendLane.EVENT,
+        send=partial(forward_onebot_group_member_to_telegram, event, bot, gateway),
+        failure_action=_telegram_failure_action,
+        max_attempts=MAX_SEND_ATTEMPTS,
+        label=f"onebot-group-{action}:{event.group_id}:{event.user_id}",
+    )
+
+
+async def forward_onebot_poke_to_telegram(
+    event: OneBotPokeEvent,
+    bot: ExtBot[None],
+    gateway: QGateway,
+) -> None:
+    """把 OneBot 群戳一戳事件格式化为 Telegram 文本消息。"""
+    tg_chat_id = await sql.get_tg_group(event.group_id)
+    if tg_chat_id is None:
+        baselog.warning("OneBot 群事件未配置转发目标: %s", event.group_id)
+        return
+    show_id = bool(await sql.get_id_show_enabled(tg_chat_id))
+    if event.user_id == event.target_id:
+        user_name = await _onebot_member_name(
+            gateway, event.group_id, event.user_id
+        )
+        target_name = None
+    else:
+        user_name, target_name = await asyncio.gather(
+            _onebot_member_name(gateway, event.group_id, event.user_id),
+            _onebot_member_name(gateway, event.group_id, event.target_id),
+        )
+    user = _event_member_text(user_name, event.user_id, show_id=show_id)
+    target = (
+        "自己"
+        if event.user_id == event.target_id
+        else _event_member_text(target_name, event.target_id, show_id=show_id)
+    )
+    await bot.send_message(
+        chat_id=tg_chat_id,
+        text=f"{user} {event.action} {target} {event.suffix}",
+    )
+
+
+def onebot_poke_task(
+    event: OneBotPokeEvent,
+    bot: ExtBot[None],
+    gateway: QGateway,
+) -> SendTask:
+    """创建发送到 Telegram 事件队列的戳一戳任务。"""
+    return SendTask(
+        target=SendTarget.TELEGRAM,
+        lane=SendLane.EVENT,
+        send=partial(forward_onebot_poke_to_telegram, event, bot, gateway),
+        failure_action=_telegram_failure_action,
+        max_attempts=MAX_SEND_ATTEMPTS,
+        label=f"onebot-poke:{event.group_id}:{event.user_id}:{event.target_id}",
+    )
+
+
+def onebot_recall_task(
+    q_group_id: int,
+    q_message_id: int,
+    bot: ExtBot[None],
+    *,
+    tg_chat_id: int | None = None,
+    tg_message_ids: tuple[int, ...] = (),
+) -> SendTask:
+    """创建与普通 OneBot 消息同队列、同重试策略的 Telegram 撤回任务。"""
+    return SendTask(
+        target=SendTarget.TELEGRAM,
+        lane=SendLane.EVENT,
+        send=partial(
+            recall_onebot_message_from_telegram,
+            q_group_id,
+            q_message_id,
+            bot,
+            tg_chat_id=tg_chat_id,
+            tg_message_ids=tg_message_ids,
+        ),
+        failure_action=_telegram_failure_action,
+        max_attempts=MAX_SEND_ATTEMPTS,
+        label=f"onebot-recall:{q_group_id}:{q_message_id}",
+    )
+
+
+async def finalize_onebot_forward(msg: OneBotMessage, bot: ExtBot[None]) -> None:
+    """结束在途状态，并把等待中的撤回交给事件队列。"""
+    from src.bus import message_bus
+
+    key = (msg.group_id, msg.message_id)
+    if key not in _pending_onebot_recalls:
+        _active_onebot_forwards.discard(key)
+        return
+    if msg.tg_chat_id is None or not msg.tg_message_ids:
+        _active_onebot_forwards.discard(key)
+        _pending_onebot_recalls.discard(key)
+        return
+    await message_bus.put(
+        onebot_recall_task(
+            msg.group_id,
+            msg.message_id,
+            bot,
+            tg_chat_id=msg.tg_chat_id,
+            tg_message_ids=tuple(msg.tg_message_ids),
+        )
+    )
+    _active_onebot_forwards.discard(key)
+    _pending_onebot_recalls.discard(key)
 
 
 async def _send_downloaded_media_individually(
@@ -679,8 +959,8 @@ def _onebot_failure_action(error: Exception) -> FailureAction:
 
 
 def _telegram_failure_action(error: Exception) -> FailureAction:
-    """Telegram 发送失败统一重试，最多次数由任务配置决定。"""
-    if isinstance(error, MediaTooLargeError):
+    """只重试结果明确未成功的错误，避免超时后重复发送。"""
+    if isinstance(error, (MediaTooLargeError, TimedOut)):
         return FailureAction.DROP
     return FailureAction.RETRY
 
@@ -725,7 +1005,12 @@ async def _notify_onebot_telegram_failure(
     text = (
         str(error)
         if isinstance(error, MediaTooLargeError)
-        else "消息转发到 Telegram 连续失败 3 次，请稍后重试。"
+        else (
+            "消息发送到 Telegram 超时，发送结果未知；为避免重复发送未自动重试，"
+            "请检查 Telegram 群。"
+            if isinstance(error, TimedOut)
+            else "消息转发到 Telegram 连续失败 3 次，请稍后重试。"
+        )
     )
     enqueue_onebot_notice(
         gateway,
@@ -838,5 +1123,6 @@ def onebot_forward_task(
         failure_action=_telegram_failure_action,
         max_attempts=MAX_SEND_ATTEMPTS,
         on_failed=partial(_notify_onebot_telegram_failure, msg, gateway),
+        finalize=partial(finalize_onebot_forward, msg, bot),
         label=f"onebot-to-telegram:{msg.group_id}:{msg.message_id}",
     )

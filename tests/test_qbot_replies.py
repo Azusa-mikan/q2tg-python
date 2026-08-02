@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from functools import partial
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ import httpx
 from telegram.ext import ExtBot
 
 from src.bus import MessageBus
+from src.forwarding import abandon_onebot_forward
 from src.messages import OneBotMessage, SendTarget, SendTask
 from src.qbot import q_gateway, receive_onebot_event
 
@@ -21,7 +23,7 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
     async def _receive(self, event: dict) -> OneBotMessage:
         with patch("src.qbot.message_bus", self.bus):
             await receive_onebot_event(event, self.bot, self.client)
-        task = await self.bus.telegram_queue.get()
+        task = await asyncio.wait_for(self.bus.telegram_queue.get(), timeout=1)
         try:
             self.assertIsInstance(task, SendTask)
             assert isinstance(task, SendTask)
@@ -31,6 +33,7 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
             message = task.send.args[0]
             self.assertIsInstance(message, OneBotMessage)
             assert isinstance(message, OneBotMessage)
+            abandon_onebot_forward(message.group_id, message.message_id)
             return message
         finally:
             self.bus.telegram_queue.task_done()
@@ -184,6 +187,36 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
             q_group_id=3,
             text="消息发送到 Telegram 失败：发送队列已满，请稍后重试。",
         )
+
+    async def test_duplicate_inflight_message_is_only_queued_once(self) -> None:
+        event = {
+            "post_type": "message",
+            "message_type": "group",
+            "self_id": 1,
+            "user_id": 2,
+            "group_id": 30,
+            "message_id": -40,
+            "sender": {"nickname": "User"},
+            "message": [
+                {
+                    "type": "video",
+                    "data": {
+                        "file": "clip.mp4",
+                        "url": "https://example.test/video",
+                    },
+                }
+            ],
+        }
+        with (
+            patch("src.qbot.message_bus", self.bus),
+            patch("src.qbot.qlog.warning") as warning,
+        ):
+            await receive_onebot_event(event, self.bot, self.client)
+            await receive_onebot_event(event, self.bot, self.client)
+
+        self.assertEqual(self.bus.telegram_queue.qsize(), 1)
+        warning.assert_called_once()
+        abandon_onebot_forward(30, -40)
 
 
 if __name__ == "__main__":

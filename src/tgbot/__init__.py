@@ -45,6 +45,10 @@ class TGBot:
         """构建 PTB Application，并注册继承自 TGhandlers 的所有处理器。"""
         app = ApplicationBuilder()
         app.token(token)
+        # 视频等媒体可能需要较长上传时间。放宽媒体写入和响应等待时间，减少
+        # Telegram 已接收文件但客户端先超时所造成的结果不确定窗口。
+        app.media_write_timeout(120)
+        app.read_timeout(60)
         if proxy_url is not None:
             app.proxy(proxy_url)
             app.get_updates_proxy(proxy_url)

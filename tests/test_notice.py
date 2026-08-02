@@ -5,7 +5,7 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 from src.bus import MessageBus
-from src.messages import SendTarget, SendTask
+from src.messages import SendLane, SendTarget, SendTask
 from src.notice import enqueue_bridge_notice
 from src.qbot import QGateway
 
@@ -24,8 +24,8 @@ class BridgeNoticeTests(unittest.IsolatedAsyncioTestCase):
             bus=bus,
         )
 
-        telegram_task = await bus.telegram_queue.get()
-        onebot_task = await bus.onebot_queue.get()
+        telegram_task = await bus.telegram_system_queue.get()
+        onebot_task = await bus.onebot_system_queue.get()
         try:
             self.assertIsInstance(telegram_task, SendTask)
             self.assertIsInstance(onebot_task, SendTask)
@@ -38,8 +38,8 @@ class BridgeNoticeTests(unittest.IsolatedAsyncioTestCase):
             await telegram_task.send()
             await onebot_task.send()
         finally:
-            bus.telegram_queue.task_done()
-            bus.onebot_queue.task_done()
+            bus.telegram_system_queue.task_done()
+            bus.onebot_system_queue.task_done()
 
         telegram_send.assert_awaited_once_with()
         gateway.send_group_message.assert_awaited_once_with(
@@ -59,11 +59,15 @@ class BridgeNoticeTests(unittest.IsolatedAsyncioTestCase):
             bus=bus,
         )
         with patch("src.bus.baselog.exception"):
-            telegram_consumer = asyncio.create_task(bus.consume(SendTarget.TELEGRAM))
-            onebot_consumer = asyncio.create_task(bus.consume(SendTarget.ONEBOT))
+            telegram_consumer = asyncio.create_task(
+                bus.consume(SendTarget.TELEGRAM, SendLane.SYSTEM)
+            )
+            onebot_consumer = asyncio.create_task(
+                bus.consume(SendTarget.ONEBOT, SendLane.SYSTEM)
+            )
             try:
-                await bus.join(SendTarget.TELEGRAM)
-                await bus.join(SendTarget.ONEBOT)
+                await bus.join(SendTarget.TELEGRAM, SendLane.SYSTEM)
+                await bus.join(SendTarget.ONEBOT, SendLane.SYSTEM)
             finally:
                 telegram_consumer.cancel()
                 onebot_consumer.cancel()
@@ -75,12 +79,18 @@ class BridgeNoticeTests(unittest.IsolatedAsyncioTestCase):
 
         telegram_send.assert_awaited_once()
         gateway.send_group_message.assert_awaited_once()
-        self.assertTrue(bus.telegram_queue.empty())
-        self.assertTrue(bus.onebot_queue.empty())
+        self.assertTrue(bus.telegram_system_queue.empty())
+        self.assertTrue(bus.onebot_system_queue.empty())
 
     async def test_full_target_queue_only_drops_that_side(self) -> None:
         bus = MessageBus(maxsize=1)
-        await bus.put(SendTask(target=SendTarget.TELEGRAM, send=AsyncMock()))
+        await bus.put(
+            SendTask(
+                target=SendTarget.TELEGRAM,
+                lane=SendLane.SYSTEM,
+                send=AsyncMock(),
+            )
+        )
         gateway = SimpleNamespace(send_group_message=AsyncMock(return_value=1))
 
         with patch("src.notice.baselog.error") as error:
@@ -92,8 +102,8 @@ class BridgeNoticeTests(unittest.IsolatedAsyncioTestCase):
                 bus=bus,
             )
 
-        self.assertEqual(bus.telegram_queue.qsize(), 1)
-        self.assertEqual(bus.onebot_queue.qsize(), 1)
+        self.assertEqual(bus.telegram_system_queue.qsize(), 1)
+        self.assertEqual(bus.onebot_system_queue.qsize(), 1)
         error.assert_called_once()
 
 

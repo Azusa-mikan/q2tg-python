@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from src.bus import message_bus
 from src.config import config
 from src.log import baselog
-from src.messages import SendTarget
+from src.messages import SendLane, SendTarget
 from src.qbot import q_gateway, receive_onebot_event
 from src.tgbot import TGBot
 
@@ -84,19 +84,16 @@ async def snowluma_ws(websocket: WebSocket) -> None:
         )
         tgbot.download_client = telegram_download_client
         q_gateway.bind(websocket)
-        onebot_consumer: asyncio.Task[None] | None = None
-        telegram_consumer: asyncio.Task[None] | None = None
+        consumers: dict[tuple[SendTarget, SendLane], asyncio.Task[None]] = {}
         try:
             await tgbot.run()
             # 先完成两侧客户端初始化，再处理跨连接保留的发送任务。
-            onebot_consumer = asyncio.create_task(
-                message_bus.consume(SendTarget.ONEBOT),
-                name="onebot-send-consumer",
-            )
-            telegram_consumer = asyncio.create_task(
-                message_bus.consume(SendTarget.TELEGRAM),
-                name="telegram-send-consumer",
-            )
+            for target in SendTarget:
+                for lane in SendLane:
+                    consumers[target, lane] = asyncio.create_task(
+                        message_bus.consume(target, lane),
+                        name=f"{target.name.lower()}-{lane.name.lower()}-consumer",
+                    )
             while True:
                 data = await websocket.receive_json()
                 if q_gateway.resolve_response(data):
@@ -108,22 +105,34 @@ async def snowluma_ws(websocket: WebSocket) -> None:
             q_gateway.unbind(websocket)
             # Onebot worker 与当前连接绑定。取消时，正在执行的通用任务会进入
             # retry_queue；尚未开始的任务继续留在 Onebot 队列等待下一次连接。
-            if onebot_consumer is not None:
-                onebot_consumer.cancel()
+            onebot_consumers = [
+                task
+                for (target, _), task in consumers.items()
+                if target is SendTarget.ONEBOT
+            ]
+            for consumer in onebot_consumers:
+                consumer.cancel()
+            for consumer in onebot_consumers:
                 with suppress(asyncio.CancelledError):
-                    await onebot_consumer
+                    await consumer
             try:
                 # 停止 Telegram 生产新消息，但保留 Bot API 客户端供队列排空。
                 await tgbot.stop()
             finally:
                 # OneBot reader 已停止，不会再产生 TG 任务。先等待其独立重试链路
                 # 稳定排空，再放停止信号，避免重试任务落到哨兵后面。
-                if telegram_consumer is not None:
-                    await message_bus.join(SendTarget.TELEGRAM)
-                    await message_bus.stop_consumer(SendTarget.TELEGRAM)
+                telegram_consumers = {
+                    lane: task
+                    for (target, lane), task in consumers.items()
+                    if target is SendTarget.TELEGRAM
+                }
+                for lane in telegram_consumers:
+                    await message_bus.join(SendTarget.TELEGRAM, lane)
+                for lane in telegram_consumers:
+                    await message_bus.stop_consumer(SendTarget.TELEGRAM, lane)
                 try:
-                    if telegram_consumer is not None:
-                        await telegram_consumer
+                    for consumer in telegram_consumers.values():
+                        await consumer
                 finally:
                     try:
                         await tgbot.shutdown()

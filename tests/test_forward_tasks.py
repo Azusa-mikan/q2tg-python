@@ -5,6 +5,7 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from telegram.error import TimedOut
 from telegram.ext import ExtBot
 
 from src.bus import MessageBus
@@ -81,13 +82,13 @@ class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(task.send.await_count, 3)
-        onebot_notice = await bus.onebot_queue.get()
+        onebot_notice = await bus.onebot_system_queue.get()
         try:
             self.assertIsInstance(onebot_notice, SendTask)
             assert isinstance(onebot_notice, SendTask)
             await onebot_notice.send()
         finally:
-            bus.onebot_queue.task_done()
+            bus.onebot_system_queue.task_done()
         gateway.send_group_message.assert_awaited_once_with(
             group_id=123,
             message=[
@@ -183,6 +184,44 @@ class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
             q_group_id=123,
             text="Onebot 媒体超过 20 MB，无法转发",
         )
+
+    async def test_telegram_timeout_is_not_retried_and_reports_unknown_result(self) -> None:
+        bus = MessageBus()
+        gateway = SimpleNamespace(send_group_message=AsyncMock(return_value=99))
+        message = OneBotMessage(
+            message_id=2,
+            group_id=123,
+            user_id=2,
+            sender_name="Onebot User",
+            message=[{"type": "video", "data": {"url": "https://example.test/video"}}],
+        )
+        task = onebot_forward_task(
+            message,
+            cast(ExtBot[None], SimpleNamespace()),
+            cast(httpx.AsyncClient, SimpleNamespace()),
+            cast(QGateway, gateway),
+        )
+        task.send = AsyncMock(side_effect=TimedOut("upload timed out"))
+        await bus.put(task)
+
+        with patch("src.notice.message_bus", bus):
+            consumer = asyncio.create_task(bus.consume(SendTarget.TELEGRAM))
+            try:
+                await bus.join(SendTarget.TELEGRAM)
+            finally:
+                consumer.cancel()
+                await asyncio.gather(consumer, return_exceptions=True)
+
+        task.send.assert_awaited_once()
+        onebot_notice = await bus.onebot_system_queue.get()
+        try:
+            assert isinstance(onebot_notice, SendTask)
+            await onebot_notice.send()
+        finally:
+            bus.onebot_system_queue.task_done()
+        text = gateway.send_group_message.await_args.kwargs["message"][0]["data"]["text"]
+        self.assertIn("发送结果未知", text)
+        self.assertIn("未自动重试", text)
 
 
 if __name__ == "__main__":

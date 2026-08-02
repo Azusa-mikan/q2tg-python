@@ -61,6 +61,33 @@ class QGatewayDeleteTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("no_cache", request["params"])
         self.assertEqual(member["card"], "Group Card")
 
+    async def test_get_group_member_info_can_bypass_cache(self) -> None:
+        websocket = SimpleNamespace(send_json=AsyncMock())
+        gateway = QGateway()
+        gateway.bind(cast(WebSocket, websocket))
+
+        task = asyncio.create_task(
+            gateway.get_group_member_info(123, 456, no_cache=True)
+        )
+        while websocket.send_json.await_count < 1:
+            await asyncio.sleep(0)
+        request = websocket.send_json.await_args.args[0]
+        gateway.resolve_response(
+            {
+                "status": "ok",
+                "retcode": 0,
+                "data": {"group_id": 123, "user_id": 456, "nickname": "User"},
+                "echo": request["echo"],
+            }
+        )
+        await task
+
+        self.assertEqual(request["action"], "get_group_member_info")
+        self.assertEqual(
+            request["params"],
+            {"group_id": 123, "user_id": 456, "no_cache": True},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

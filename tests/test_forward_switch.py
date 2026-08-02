@@ -50,7 +50,7 @@ class ForwardSwitchTests(unittest.IsolatedAsyncioTestCase):
                 cast(Update, update),
                 cast(ContextTypes.DEFAULT_TYPE, context),
             )
-        for queue in (bus.telegram_queue, bus.onebot_queue):
+        for queue in (bus.telegram_system_queue, bus.onebot_system_queue):
             while not queue.empty():
                 task = await queue.get()
                 try:

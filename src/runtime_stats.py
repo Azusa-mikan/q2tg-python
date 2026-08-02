@@ -46,8 +46,12 @@ class ConversionTimes:
 
 @dataclass(frozen=True, slots=True)
 class QueueSizes:
-    onebot: int
-    telegram: int
+    onebot_messages: int
+    onebot_events: int
+    onebot_system: int
+    telegram_messages: int
+    telegram_events: int
+    telegram_system: int
     retry: int
     media_processing: int
 
@@ -85,8 +89,12 @@ def _get_rss() -> str:
 def _get_queue_sizes() -> QueueSizes:
     """返回两侧发送、重试及媒体处理队列的当前项目数。"""
     return QueueSizes(
-        onebot=message_bus.onebot_queue.qsize(),
-        telegram=message_bus.telegram_queue.qsize(),
+        onebot_messages=message_bus.onebot_queue.qsize(),
+        onebot_events=message_bus.onebot_event_queue.qsize(),
+        onebot_system=message_bus.onebot_system_queue.qsize(),
+        telegram_messages=message_bus.telegram_queue.qsize(),
+        telegram_events=message_bus.telegram_event_queue.qsize(),
+        telegram_system=message_bus.telegram_system_queue.qsize(),
         retry=message_bus.retry_queue.qsize(),
         media_processing=media_processor.queue.qsize(),
     )

@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock
 
 from src.bus import MessageBus
-from src.messages import FailureAction, SendTarget, SendTask
+from src.messages import FailureAction, SendLane, SendTarget, SendTask
 
 
 class MessageBusRetryTests(unittest.IsolatedAsyncioTestCase):
@@ -29,6 +29,31 @@ class MessageBusRetryTests(unittest.IsolatedAsyncioTestCase):
         bus.onebot_queue.task_done()
         self.assertIs(await bus.telegram_queue.get(), telegram_task)
         bus.telegram_queue.task_done()
+
+    async def test_lanes_are_isolated_for_the_same_target(self) -> None:
+        bus = MessageBus()
+        message = SendTask(target=SendTarget.TELEGRAM, send=AsyncMock())
+        event = SendTask(
+            target=SendTarget.TELEGRAM,
+            lane=SendLane.EVENT,
+            send=AsyncMock(),
+        )
+        system = SendTask(
+            target=SendTarget.TELEGRAM,
+            lane=SendLane.SYSTEM,
+            send=AsyncMock(),
+        )
+
+        await bus.put(message)
+        await bus.put(event)
+        await bus.put(system)
+
+        self.assertIs(await bus.telegram_queue.get(), message)
+        bus.telegram_queue.task_done()
+        self.assertIs(await bus.telegram_event_queue.get(), event)
+        bus.telegram_event_queue.task_done()
+        self.assertIs(await bus.telegram_system_queue.get(), system)
+        bus.telegram_system_queue.task_done()
 
     async def test_retry_uses_separate_queue_and_succeeds_on_third_attempt(self) -> None:
         bus = MessageBus()

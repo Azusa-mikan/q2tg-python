@@ -15,10 +15,14 @@ class StatusHandlerTest(unittest.IsolatedAsyncioTestCase):
         info = RuntimeInfo(
             rss="12.34 MiB",
             queues=QueueSizes(
-                onebot=1,
-                telegram=2,
-                retry=3,
-                media_processing=4,
+                onebot_messages=1,
+                onebot_events=2,
+                onebot_system=3,
+                telegram_messages=4,
+                telegram_events=5,
+                telegram_system=6,
+                retry=7,
+                media_processing=8,
             ),
             conversion_averages=ConversionAverages(
                 voice=None,
@@ -39,10 +43,14 @@ class StatusHandlerTest(unittest.IsolatedAsyncioTestCase):
             "Q2TG 状态\n\n"
             "RSS：12.34 MiB\n\n"
             "消息队列\n"
-            "OneBot：1\n"
-            "Telegram：2\n"
-            "重试：3\n"
-            "媒体处理：4\n\n"
+            "OneBot 消息：1\n"
+            "OneBot 事件：2\n"
+            "OneBot 系统通知：3\n"
+            "Telegram 消息：4\n"
+            "Telegram 事件：5\n"
+            "Telegram 系统通知：6\n"
+            "重试：7\n"
+            "媒体处理：8\n\n"
             "平均转换耗时（最近 30 次）\n"
             "语音：暂无数据\n"
             "视频：1.23 秒\n"

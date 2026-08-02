@@ -28,6 +28,39 @@ class OneBotMessage:
     next_text_chunk_index: int = 0
     # 群成员名称查询结果跨发送重试复用；None 表示查询失败。
     mention_names: dict[int, str | None] = field(default_factory=dict)
+    # 转发开始后记录实际 Telegram 目标，供并发到达的撤回事件清理部分发送结果。
+    tg_chat_id: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OneBotGroupBanEvent:
+    """经过入口校验的 OneBot 群禁言或解除禁言事件。"""
+
+    group_id: int
+    operator_id: int
+    user_id: int
+    duration: int
+    lifted: bool
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OneBotGroupMemberEvent:
+    """经过入口校验的 OneBot 群成员加入或退出事件。"""
+
+    group_id: int
+    user_id: int
+    joined: bool
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OneBotPokeEvent:
+    """经过入口校验的 OneBot 群戳一戳事件。"""
+
+    group_id: int
+    user_id: int
+    target_id: int
+    action: str
+    suffix: str
 
 
 @dataclass(slots=True, kw_only=True)
@@ -71,6 +104,14 @@ class SendTarget(Enum):
     TELEGRAM = auto()
 
 
+class SendLane(Enum):
+    """按桥接领域语义隔离同一目标平台的发送任务。"""
+
+    MESSAGE = auto()
+    EVENT = auto()
+    SYSTEM = auto()
+
+
 class FailureAction(Enum):
     """任务失败后由通用总线执行的动作。"""
 
@@ -90,6 +131,7 @@ class SendTask:
 
     target: SendTarget
     send: Callable[[], Awaitable[None]]
+    lane: SendLane = SendLane.MESSAGE
     failure_action: Callable[[Exception], FailureAction] = drop_failure
     max_attempts: int = 1
     failures: int = 0

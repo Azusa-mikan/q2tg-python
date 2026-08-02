@@ -40,13 +40,26 @@ class RuntimeStatsTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(message_bus.onebot_queue, "qsize", return_value=1),
-            patch.object(message_bus.telegram_queue, "qsize", return_value=2),
-            patch.object(message_bus.retry_queue, "qsize", return_value=3),
-            patch.object(media_processor.queue, "qsize", return_value=4),
+            patch.object(message_bus.onebot_event_queue, "qsize", return_value=2),
+            patch.object(message_bus.onebot_system_queue, "qsize", return_value=3),
+            patch.object(message_bus.telegram_queue, "qsize", return_value=4),
+            patch.object(message_bus.telegram_event_queue, "qsize", return_value=5),
+            patch.object(message_bus.telegram_system_queue, "qsize", return_value=6),
+            patch.object(message_bus.retry_queue, "qsize", return_value=7),
+            patch.object(media_processor.queue, "qsize", return_value=8),
         ):
             self.assertEqual(
                 _get_queue_sizes(),
-                QueueSizes(onebot=1, telegram=2, retry=3, media_processing=4),
+                QueueSizes(
+                    onebot_messages=1,
+                    onebot_events=2,
+                    onebot_system=3,
+                    telegram_messages=4,
+                    telegram_events=5,
+                    telegram_system=6,
+                    retry=7,
+                    media_processing=8,
+                ),
             )
 
     async def test_track_conversion_keeps_latest_thirty_successes(self) -> None:
@@ -80,7 +93,16 @@ class RuntimeStatsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(conversion_times.video), [])
 
     def test_get_runtime_info_returns_complete_snapshot(self) -> None:
-        queues = QueueSizes(onebot=1, telegram=2, retry=3, media_processing=4)
+        queues = QueueSizes(
+            onebot_messages=1,
+            onebot_events=2,
+            onebot_system=3,
+            telegram_messages=4,
+            telegram_events=5,
+            telegram_system=6,
+            retry=7,
+            media_processing=8,
+        )
         averages = ConversionAverages(
             voice=None,
             video=0.5,
