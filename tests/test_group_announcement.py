@@ -163,7 +163,7 @@ class GroupAnnouncementTests(unittest.IsolatedAsyncioTestCase):
             message_id=102,
             group_id=123,
             user_id=456,
-            sender_name="OneBot 用户 456",
+            sender_name="OneBot 用户[456]",
             sender_name_is_fallback=True,
             message=[segment],
         )

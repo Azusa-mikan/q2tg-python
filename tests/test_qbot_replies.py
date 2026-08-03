@@ -104,7 +104,7 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
                 "message": [{"type": "text", "data": {"text": "message"}}],
             }
         )
-        self.assertEqual(message.sender_name, "OneBot 用户 234")
+        self.assertEqual(message.sender_name, "OneBot 用户[234]")
         self.assertTrue(message.sender_name_is_fallback)
 
     async def test_notice_subtype_is_not_queued(self) -> None:

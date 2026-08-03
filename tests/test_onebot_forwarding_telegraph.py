@@ -33,6 +33,7 @@ class OneBotForwardingTelegraphTests(unittest.IsolatedAsyncioTestCase):
         database = SimpleNamespace(
             get_tg_message=AsyncMock(return_value=None),
             get_tg_group=AsyncMock(return_value=-100123),
+            get_id_show_enabled=AsyncMock(return_value=False),
             set_message_mapping=AsyncMock(),
         )
         page = TelegraphPageRef(

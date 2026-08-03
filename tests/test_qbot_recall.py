@@ -192,7 +192,7 @@ class OneBotRecallTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mapping.tg_message_ids, (88,))
         self.bot.send_message.assert_awaited_once_with(
             chat_id=-100123,
-            text="User:\n123",
+            text="User[101]:\n123",
             reply_parameters=None,
         )
         self.delete_messages.assert_awaited_once_with(

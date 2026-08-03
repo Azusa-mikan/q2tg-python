@@ -118,6 +118,11 @@ class FaceTests(unittest.IsolatedAsyncioTestCase):
                     return_value=-789,
                 ),
                 patch(
+                    "src.forwarding.sql.get_id_show_enabled",
+                    new_callable=AsyncMock,
+                    return_value=False,
+                ),
+                patch(
                     "src.forwarding.sql.set_message_mapping",
                     new_callable=AsyncMock,
                 ),
@@ -169,6 +174,11 @@ class FaceTests(unittest.IsolatedAsyncioTestCase):
                     "src.forwarding.sql.get_tg_group",
                     new_callable=AsyncMock,
                     return_value=-789,
+                ),
+                patch(
+                    "src.forwarding.sql.get_id_show_enabled",
+                    new_callable=AsyncMock,
+                    return_value=False,
                 ),
                 patch(
                     "src.forwarding.sql.set_message_mapping",

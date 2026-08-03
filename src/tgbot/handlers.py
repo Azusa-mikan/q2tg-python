@@ -32,8 +32,14 @@ from src.forwarding import (
     telegram_pin_task,
     telegram_processing_task,
 )
+from src.log import baselog
 from src.media import MediaFile, media_item_budget, media_queue_budget
-from src.messages import TelegramGroupMemberEvent, TelegramMedia, TelegramMessage
+from src.messages import (
+    OneBotConnectionError,
+    TelegramGroupMemberEvent,
+    TelegramMedia,
+    TelegramMessage,
+)
 from src.notice import enqueue_bridge_notice
 from src.processing import media_processor
 from src.qbot import q_gateway
@@ -140,6 +146,25 @@ class TGhandlers:
 
         try:
             q_group_id = int(args[0])
+        except ValueError as error:
+            await msg.reply_text(str(error))
+            return
+
+        try:
+            groups = await q_gateway.get_group_list()
+            if not any(group.get("group_id") == q_group_id for group in groups):
+                await msg.reply_text("Onebot端未找到该群聊")
+                return
+            group = await q_gateway.get_group_info(q_group_id)
+            group_name = group.get("group_name")
+            if not isinstance(group_name, str) or not group_name:
+                raise TypeError(f"OneBot 群资料缺少 group_name: {group!r}")
+        except (OneBotConnectionError, RuntimeError, TimeoutError, TypeError):
+            baselog.exception("绑定群聊时查询 OneBot 群资料失败: %s", q_group_id)
+            await msg.reply_text("Onebot 错误，请检查日志")
+            return
+
+        try:
             # Sql 会校验正整数和一对一冲突，不在 handler 中重复规则。
             await sql.bind_group(q_group_id, chat.id)
         except ValueError as error:
@@ -147,10 +172,10 @@ class TGhandlers:
             return
 
         enqueue_bridge_notice(
-            partial(msg.reply_text, f"已绑定 Telegram 群与 Onebot 群 {q_group_id}"),
+            partial(msg.reply_text, f"已绑定群 {group_name}"),
             q_gateway,
             q_group_id=q_group_id,
-            text=f"已绑定 Telegram 群与 Onebot 群 {q_group_id}",
+            text=f"已绑定群 {chat.title}",
         )
 
     async def unbind(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,16 +192,28 @@ class TGhandlers:
             await msg.reply_text("只有管理员可以解除绑定")
             return
 
-        q_group_id = await sql.unbind_tg_group(chat.id)
+        q_group_id = await sql.get_q_group(chat.id)
         if q_group_id is None:
             await msg.reply_text("当前群聊尚未绑定 OneBot 群")
             return
 
+        try:
+            group = await q_gateway.get_group_info(q_group_id)
+            group_name = group.get("group_name")
+            if not isinstance(group_name, str) or not group_name:
+                raise TypeError(f"OneBot 群资料缺少 group_name: {group!r}")
+        except (OneBotConnectionError, RuntimeError, TimeoutError, TypeError):
+            baselog.exception("解除绑定时查询 OneBot 群资料失败: %s", q_group_id)
+            await msg.reply_text("Onebot 错误，请检查日志")
+            return
+
+        await sql.unbind_tg_group(chat.id)
+
         enqueue_bridge_notice(
-            partial(msg.reply_text, f"已解除 Telegram 群与 Onebot 群 {q_group_id} 的绑定"),
+            partial(msg.reply_text, f"已解绑群 {group_name}"),
             q_gateway,
             q_group_id=q_group_id,
-            text=f"已解除 Telegram 群与 Onebot 群 {q_group_id} 的绑定",
+            text=f"已解绑群 {chat.title}",
         )
 
     async def forward(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

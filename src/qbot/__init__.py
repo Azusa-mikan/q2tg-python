@@ -138,6 +138,27 @@ class QGateway:
             raise TypeError(f"OneBot 群成员响应缺少 data: {response!r}")
         return data
 
+    async def get_group_info(self, group_id: int) -> dict[str, Any]:
+        """跳过缓存查询指定 OneBot 群的资料。"""
+        response = await self._call_action(
+            "get_group_info",
+            {"group_id": group_id, "no_cache": True},
+        )
+        data = response.get("data")
+        if not isinstance(data, dict):
+            raise TypeError(f"OneBot 群资料响应缺少 data: {response!r}")
+        return data
+
+    async def get_group_list(self) -> list[dict[str, Any]]:
+        """跳过缓存查询 OneBot 机器人当前加入的群聊。"""
+        response = await self._call_action("get_group_list", {"no_cache": True})
+        data = response.get("data")
+        if not isinstance(data, list) or not all(
+            isinstance(group, dict) for group in data
+        ):
+            raise TypeError(f"OneBot 群列表响应缺少 data: {response!r}")
+        return data
+
     async def get_forward_messages(self, forward_id: str) -> list[dict[str, Any]]:
         """调用 get_forward_msg，并返回经过外壳校验的合并转发消息。"""
         response = await self._call_action("get_forward_msg", {"id": forward_id})
@@ -225,7 +246,7 @@ def _sender_name(data: dict[Any, Any], user_id: int) -> tuple[str, bool]:
         nickname = _nonempty_string(sender.get("nickname"))
         if nickname is not None:
             return nickname, False
-    return f"{ONEBOT_USER_NAME} {user_id}", True
+    return f"{ONEBOT_USER_NAME}[{user_id}]", True
 
 
 def _normalize_segments(value: Any) -> list[dict[str, Any]] | None:

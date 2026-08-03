@@ -110,7 +110,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         bot.send_voice.assert_awaited_once()
-        self.assertEqual(bot.send_voice.await_args.kwargs["caption"], "OneBot User:")
+        self.assertEqual(bot.send_voice.await_args.kwargs["caption"], "OneBot User[1]:")
         self.assertEqual(bot.send_voice.await_args.kwargs["voice"].filename, "voice.ogg")
 
     async def test_record_without_url_sends_visible_placeholder(self) -> None:
@@ -135,7 +135,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
 
         bot.send_message.assert_awaited_once_with(
             chat_id=-456,
-            text="OneBot User:\n[语音无法转发：缺少可用的 HTTP(S) 下载地址]",
+            text="OneBot User[1]:\n[语音无法转发：缺少可用的 HTTP(S) 下载地址]",
             reply_parameters=None,
         )
 

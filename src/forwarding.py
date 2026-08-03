@@ -378,12 +378,7 @@ async def forward_onebot_to_telegram(
     super_face_id = onebot_super_face_id(normalized_message)
 
     sender_name = msg.sender_name
-    has_mentions = any(segment.get("type") == "at" for segment in normalized_message)
-    id_show_enabled = (
-        bool(await sql.get_id_show_enabled(group_id))
-        if msg.sender_name_is_fallback or has_mentions
-        else False
-    )
+    id_show_enabled = bool(await sql.get_id_show_enabled(group_id))
     has_faces = any(segment.get("type") == "face" for segment in normalized_message)
     has_forwards = any(segment.get("type") == "forward" for segment in normalized_message)
     announcement = onebot_group_announcement(normalized_message)
@@ -424,6 +419,8 @@ async def forward_onebot_to_telegram(
         text = f"{text}\n{forward_text}" if text else forward_text
     if msg.sender_name_is_fallback and not id_show_enabled:
         sender_name = ONEBOT_USER_NAME
+    elif not msg.sender_name_is_fallback and id_show_enabled:
+        sender_name = f"{sender_name}[{msg.user_id}]"
     if markdown_v2 and super_face_id is None:
         sender_name = escape_markdown(sender_name, version=2)
     media, unavailable = onebot_message_media(normalized_message)

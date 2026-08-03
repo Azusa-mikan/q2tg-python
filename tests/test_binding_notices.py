@@ -26,15 +26,24 @@ class BindingNoticeTests(unittest.IsolatedAsyncioTestCase):
         await self.sql.close()
         self.directory.cleanup()
 
-    async def test_bind_and_unbind_send_the_same_notice_to_both_sides(self) -> None:
+    async def test_bind_and_unbind_send_each_side_the_other_group_name(self) -> None:
         message = SimpleNamespace(reply_text=AsyncMock())
         update = SimpleNamespace(
             effective_message=message,
-            effective_chat=SimpleNamespace(id=-456, type="supergroup"),
+            effective_chat=SimpleNamespace(
+                id=-456,
+                type="supergroup",
+                title="Example Telegram Group",
+            ),
             effective_user=SimpleNamespace(id=config.tgbot_admin),
         )
-        context = SimpleNamespace(args=["123"])
-        gateway = SimpleNamespace(send_group_message=AsyncMock(return_value=1))
+        context = SimpleNamespace(args=["123456789"])
+        group = {"group_id": 123_456_789, "group_name": "Example OneBot Group"}
+        gateway = SimpleNamespace(
+            get_group_list=AsyncMock(return_value=[group]),
+            get_group_info=AsyncMock(return_value=group),
+            send_group_message=AsyncMock(return_value=1),
+        )
         bus = MessageBus()
 
         with (
@@ -70,17 +79,114 @@ class BindingNoticeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [call.args[0] for call in message.reply_text.await_args_list],
             [
-                "已绑定 Telegram 群与 Onebot 群 123",
-                "已解除 Telegram 群与 Onebot 群 123 的绑定",
+                "已绑定群 Example OneBot Group",
+                "已解绑群 Example OneBot Group",
             ],
         )
         self.assertEqual(
-            [call.kwargs["message"][0]["data"]["text"] for call in gateway.send_group_message.await_args_list],
             [
-                "已绑定 Telegram 群与 Onebot 群 123",
-                "已解除 Telegram 群与 Onebot 群 123 的绑定",
+                call.kwargs["message"][0]["data"]["text"]
+                for call in gateway.send_group_message.await_args_list
+            ],
+            [
+                "已绑定群 Example Telegram Group",
+                "已解绑群 Example Telegram Group",
             ],
         )
+        gateway.get_group_list.assert_awaited_once_with()
+        self.assertEqual(gateway.get_group_info.await_count, 2)
+        gateway.get_group_info.assert_any_await(123_456_789)
+
+    async def test_bind_rejects_group_missing_from_onebot_group_list(self) -> None:
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(
+            effective_message=message,
+            effective_chat=SimpleNamespace(
+                id=-456,
+                type="supergroup",
+                title="Example Telegram Group",
+            ),
+            effective_user=SimpleNamespace(id=config.tgbot_admin),
+        )
+        context = SimpleNamespace(args=["123456789"])
+        gateway = SimpleNamespace(
+            get_group_list=AsyncMock(return_value=[]),
+            get_group_info=AsyncMock(),
+        )
+
+        with (
+            patch("src.tgbot.handlers.sql", self.sql),
+            patch("src.tgbot.handlers.q_gateway", gateway),
+        ):
+            await self.handler.bind(
+                cast(Update, update),
+                cast(ContextTypes.DEFAULT_TYPE, context),
+            )
+
+        message.reply_text.assert_awaited_once_with("Onebot端未找到该群聊")
+        gateway.get_group_info.assert_not_awaited()
+        self.assertIsNone(await self.sql.get_q_group(-456))
+
+    async def test_bind_reports_and_logs_onebot_error(self) -> None:
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(
+            effective_message=message,
+            effective_chat=SimpleNamespace(
+                id=-456,
+                type="supergroup",
+                title="Example Telegram Group",
+            ),
+            effective_user=SimpleNamespace(id=config.tgbot_admin),
+        )
+        context = SimpleNamespace(args=["123456789"])
+        gateway = SimpleNamespace(
+            get_group_list=AsyncMock(side_effect=RuntimeError("OneBot failed")),
+        )
+
+        with (
+            patch("src.tgbot.handlers.sql", self.sql),
+            patch("src.tgbot.handlers.q_gateway", gateway),
+            patch("src.tgbot.handlers.baselog.exception") as log_exception,
+        ):
+            await self.handler.bind(
+                cast(Update, update),
+                cast(ContextTypes.DEFAULT_TYPE, context),
+            )
+
+        message.reply_text.assert_awaited_once_with("Onebot 错误，请检查日志")
+        log_exception.assert_called_once()
+        self.assertIsNone(await self.sql.get_q_group(-456))
+
+    async def test_unbind_keeps_mapping_when_group_info_request_fails(self) -> None:
+        await self.sql.bind_group(123_456_789, -456)
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(
+            effective_message=message,
+            effective_chat=SimpleNamespace(
+                id=-456,
+                type="supergroup",
+                title="Example Telegram Group",
+            ),
+            effective_user=SimpleNamespace(id=config.tgbot_admin),
+        )
+        context = SimpleNamespace(args=[])
+        gateway = SimpleNamespace(
+            get_group_info=AsyncMock(side_effect=RuntimeError("OneBot failed")),
+        )
+
+        with (
+            patch("src.tgbot.handlers.sql", self.sql),
+            patch("src.tgbot.handlers.q_gateway", gateway),
+            patch("src.tgbot.handlers.baselog.exception") as log_exception,
+        ):
+            await self.handler.unbind(
+                cast(Update, update),
+                cast(ContextTypes.DEFAULT_TYPE, context),
+            )
+
+        message.reply_text.assert_awaited_once_with("Onebot 错误，请检查日志")
+        log_exception.assert_called_once()
+        self.assertEqual(await self.sql.get_q_group(-456), 123_456_789)
 
 
 if __name__ == "__main__":

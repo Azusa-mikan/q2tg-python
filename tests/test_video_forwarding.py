@@ -141,7 +141,10 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         bot.send_document.assert_awaited_once()
-        self.assertEqual(bot.send_document.await_args.kwargs["caption"], "OneBot User:\ncaption")
+        self.assertEqual(
+            bot.send_document.await_args.kwargs["caption"],
+            "OneBot User[1]:\ncaption",
+        )
 
     async def test_telegram_file_keeps_text_in_same_onebot_message(self) -> None:
         content = await MediaFile.create(
@@ -244,7 +247,10 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         bot.send_video.assert_awaited_once()
         self.assertTrue(bot.send_video.await_args.kwargs["supports_streaming"])
         self.assertTrue(bot.send_video.await_args.kwargs["show_caption_above_media"])
-        self.assertEqual(bot.send_video.await_args.kwargs["caption"], "OneBot User:\ncaption")
+        self.assertEqual(
+            bot.send_video.await_args.kwargs["caption"],
+            "OneBot User[1]:\ncaption",
+        )
         bot.send_document.assert_not_awaited()
         mapping = await self.database.get_tg_message(123, 101)
         self.assertIsNotNone(mapping)
@@ -339,7 +345,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             message_id=111,
             group_id=123,
             user_id=234,
-            sender_name="OneBot 用户 234",
+            sender_name="OneBot 用户[234]",
             sender_name_is_fallback=True,
             message=[{"type": "text", "data": {"text": "message"}}],
         )
@@ -382,6 +388,61 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         bot.send_message.assert_awaited_once_with(
             chat_id=-456,
             text="Named User:\nmessage",
+            reply_parameters=None,
+        )
+
+    async def test_enabled_id_show_appends_user_id_to_real_sender_name(self) -> None:
+        await self.database.set_id_show_enabled(-456, True)
+        bot = SimpleNamespace(
+            send_message=AsyncMock(return_value=SimpleNamespace(message_id=211)),
+        )
+        message = OneBotMessage(
+            message_id=113,
+            group_id=123,
+            user_id=234,
+            sender_name="Example User",
+            message=[{"type": "text", "data": {"text": "message"}}],
+        )
+
+        async with httpx.AsyncClient() as client:
+            with patch("src.forwarding.sql", self.database):
+                await forward_onebot_to_telegram(
+                    message,
+                    cast(ExtBot[None], bot),
+                    client,
+                )
+
+        bot.send_message.assert_awaited_once_with(
+            chat_id=-456,
+            text="Example User[234]:\nmessage",
+            reply_parameters=None,
+        )
+
+    async def test_enabled_id_show_does_not_duplicate_fallback_user_id(self) -> None:
+        await self.database.set_id_show_enabled(-456, True)
+        bot = SimpleNamespace(
+            send_message=AsyncMock(return_value=SimpleNamespace(message_id=212)),
+        )
+        message = OneBotMessage(
+            message_id=114,
+            group_id=123,
+            user_id=234,
+            sender_name="OneBot 用户[234]",
+            sender_name_is_fallback=True,
+            message=[{"type": "text", "data": {"text": "message"}}],
+        )
+
+        async with httpx.AsyncClient() as client:
+            with patch("src.forwarding.sql", self.database):
+                await forward_onebot_to_telegram(
+                    message,
+                    cast(ExtBot[None], bot),
+                    client,
+                )
+
+        bot.send_message.assert_awaited_once_with(
+            chat_id=-456,
+            text="OneBot 用户[234]:\nmessage",
             reply_parameters=None,
         )
 
@@ -489,7 +550,10 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
 
         bot.send_photo.assert_awaited_once()
         self.assertTrue(bot.send_photo.await_args.kwargs["show_caption_above_media"])
-        self.assertEqual(bot.send_photo.await_args.kwargs["caption"], "OneBot User:\ncaption")
+        self.assertEqual(
+            bot.send_photo.await_args.kwargs["caption"],
+            "OneBot User[1]:\ncaption",
+        )
 
     async def test_onebot_gif_image_is_sent_as_animation(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -533,7 +597,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         bot.send_photo.assert_not_awaited()
         kwargs = bot.send_animation.await_args.kwargs
         self.assertEqual(kwargs["animation"].filename, "animation.gif")
-        self.assertEqual(kwargs["caption"], "OneBot User:\ncaption")
+        self.assertEqual(kwargs["caption"], "OneBot User[1]:\ncaption")
         self.assertTrue(kwargs["show_caption_above_media"])
 
     async def test_gif_in_image_group_disables_telegram_album(self) -> None:
@@ -647,7 +711,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.send_media_group.await_count, 2)
         album = bot.send_media_group.await_args.kwargs["media"]
         self.assertEqual(len(album), 3)
-        self.assertEqual(album[0].caption, "OneBot User:\n测试")
+        self.assertEqual(album[0].caption, "OneBot User[1]:\n测试")
         self.assertTrue(album[0].show_caption_above_media)
         self.assertIsNone(album[1].caption)
         self.assertFalse(album[1].show_caption_above_media)
@@ -717,7 +781,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item.type for item in album], ["document"] * 3)
         self.assertIsNone(album[0].caption)
         self.assertIsNone(album[1].caption)
-        self.assertEqual(album[2].caption, "OneBot User:\n测试")
+        self.assertEqual(album[2].caption, "OneBot User[1]:\n测试")
         attach_uris = [item.media.attach_uri for item in album]
         self.assertTrue(all(uri and uri.startswith("attach://") for uri in attach_uris))
         self.assertEqual(len(set(attach_uris)), 3)
@@ -748,7 +812,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
 
         bot.send_message.assert_awaited_once_with(
             chat_id=-456,
-            text="OneBot User:\n[视频无法转发：缺少可用的 HTTP(S) 下载地址]",
+            text="OneBot User[1]:\n[视频无法转发：缺少可用的 HTTP(S) 下载地址]",
             reply_parameters=None,
         )
         mapping = await self.database.get_tg_message(123, 103)
