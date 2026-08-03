@@ -1105,6 +1105,8 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
         return
     if not await sql.get_tg_forward_enabled(msg.group_id):
         return
+    if msg.bot_forward_required and not await sql.get_bot_forward_enabled(msg.group_id):
+        return
     if not msg.text and not msg.media:
         baselog.warning("Telegram 消息没有可转发的内容: %s", msg.message_ids)
         return

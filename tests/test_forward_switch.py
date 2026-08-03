@@ -80,6 +80,26 @@ class ForwardSwitchTests(unittest.IsolatedAsyncioTestCase):
             )
         return message
 
+    async def _bot_forward(self, *, args: list[str], status: str):
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(
+            effective_message=message,
+            effective_chat=SimpleNamespace(id=-456, type="supergroup"),
+            effective_user=SimpleNamespace(id=10),
+        )
+        context = SimpleNamespace(
+            args=args,
+            bot=SimpleNamespace(
+                get_chat_member=AsyncMock(return_value=SimpleNamespace(status=status))
+            ),
+        )
+        with patch("src.tgbot.handlers.sql", self.sql):
+            await self.handler.bot_forward(
+                cast(Update, update),
+                cast(ContextTypes.DEFAULT_TYPE, context),
+            )
+        return message
+
     async def test_group_admin_can_disable_and_enable_forwarding(self) -> None:
         message, gateway = await self._forward(args=["off"], status=ChatMember.ADMINISTRATOR)
         self.assertFalse(await self.sql.get_tg_forward_enabled(-456))
@@ -114,6 +134,21 @@ class ForwardSwitchTests(unittest.IsolatedAsyncioTestCase):
         message = await self._id_show(args=["off"], status=ChatMember.MEMBER)
         self.assertTrue(await self.sql.get_id_show_enabled(-456))
         message.reply_text.assert_awaited_once_with("只有群聊管理员可以设置 ID 显示")
+
+    async def test_group_admin_can_enable_and_query_bot_forward(self) -> None:
+        self.assertFalse(await self.sql.get_bot_forward_enabled(-456))
+
+        message = await self._bot_forward(args=["on"], status=ChatMember.ADMINISTRATOR)
+        self.assertTrue(await self.sql.get_bot_forward_enabled(-456))
+        message.reply_text.assert_awaited_once_with("其他 Bot 消息转发已开启")
+
+        message = await self._bot_forward(args=[], status=ChatMember.OWNER)
+        message.reply_text.assert_awaited_once_with("其他 Bot 消息转发已开启")
+
+    async def test_regular_member_cannot_enable_bot_forward(self) -> None:
+        message = await self._bot_forward(args=["on"], status=ChatMember.MEMBER)
+        self.assertFalse(await self.sql.get_bot_forward_enabled(-456))
+        message.reply_text.assert_awaited_once_with("只有群聊管理员可以设置其他 Bot 消息转发")
 
 
 if __name__ == "__main__":

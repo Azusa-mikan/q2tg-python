@@ -117,6 +117,7 @@ class TelegramMessage:
     user_id: int
     sender_name: str
     text: str | None
+    bot_forward_required: bool = False
     forwarded_from: str | None = None
     reply_message_id: int | None = None
     media: tuple[TelegramMedia, ...] = ()

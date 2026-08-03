@@ -21,6 +21,7 @@ Q2TG-Python 是一个基于 OneBot 11 与 Telegram Bot API 的双向群消息桥
 
 - OneBot 群与 Telegram 群一对一绑定
 - 双向转发文本、图片、图片组、GIF、文件、视频、语音和贴纸
+- 可选同步其他 Telegram Bot 的消息，以及用户发给其他 Bot 的命令
 - 支持 OneBot 合并转发，并通过 Telegraph 页面展示
 - 同步 OneBot 精华消息与 Telegram 置顶消息
 - 保留消息回复关系与来源引用
@@ -135,6 +136,11 @@ SNOWLUMA_GID=1000
 [@BotFather](https://t.me/BotFather) 获取。代理支持 `http://`、`https://`、
 `socks5://` 和 `socks5h://`，留空表示直连。程序不读取 `HTTP_PROXY`、
 `HTTPS_PROXY` 或 `ALL_PROXY`。
+
+需要同步其他 Telegram Bot 的消息时，还应按照
+[Bot-to-Bot Communication Mode 开启教程](bot_to_bot.md)，通过 BotFather Mini App 为
+Q2TG-Python 使用的 Bot 开启该模式。该 Bot 必须是目标群管理员，或关闭 Group Privacy
+Mode；修改 Group Privacy Mode 后，需要将 Bot 移出目标群再重新加入。
 
 `Q2TG_DATABASE_URL` 必须使用不带驱动名的标准 scheme：
 
@@ -291,6 +297,7 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 | `/bind <OneBot 群号>` | 配置的 Bot 管理员 | 绑定当前 Telegram 群与 OneBot 群 |
 | `/unbind` | 配置的 Bot 管理员 | 解除当前群的绑定 |
 | `/forward [on\|off]` | Telegram 群管理员 | 查询或设置 Telegram 到 OneBot 的转发状态 |
+| `/bot_forward [on\|off]` | Telegram 群管理员 | 查询或设置其他 Bot 消息及用户发给其他 Bot 的命令是否转发到 OneBot |
 | `/id_show [on\|off]` | Telegram 群管理员 | 查询或设置 OneBot 用户及 @ 对象的数字 ID 显示 |
 | `/undo` | 按实现权限检查 | 回复目标消息后撤回两侧对应消息 |
 | `/unpin` | Telegram 群管理员 | 回复目标消息后取消两侧对应消息的置顶和精华状态 |
@@ -302,6 +309,10 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 ```
 
 每个 OneBot 群和 Telegram 群只能参与一个绑定关系。
+
+`/bot_forward` 按绑定群独立保存，默认关闭，并受 `/forward` 总开关控制。开启后会同步其他
+Bot 的文本和受支持媒体，以及 `/new@other_bot` 这类用户命令；Q2TG-Python 自身的管理命令
+不会转发。启用前应确认相关 Bot 不会互相无限回复。
 
 ## 数据与限制
 
@@ -337,6 +348,11 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 
 确认当前 Telegram 群已经通过 `/bind` 绑定，并使用 `/forward` 检查转发开关。同时检查
 Telegram Bot 是否有读取和发送群消息所需的权限。
+
+其他 Bot 消息或用户发给其他 Bot 的命令无法转发时，还应确认已执行 `/bot_forward on`，
+并检查 Q2TG-Python 使用的 Telegram Bot 是否已经按照
+[开启教程](bot_to_bot.md)通过 BotFather Mini App 开启 Bot-to-Bot Communication Mode。
+其他 Bot 消息仍通过普通 `message` Update 下发，无需配置额外的 Update 类型。
 
 ### 图片或视频转发失败
 

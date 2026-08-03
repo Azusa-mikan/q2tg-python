@@ -268,6 +268,49 @@ class TGhandlers:
             return
         await msg.reply_text(f"Onebot 用户及 @ 对象 ID 显示已{'开启' if enabled else '关闭'}")
 
+    async def bot_forward(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """查询或设置当前 Telegram 群的其他 Bot 消息转发开关。"""
+        msg = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if msg is None or chat is None or user is None:
+            return
+        if chat.type not in {"group", "supergroup"}:
+            await msg.reply_text("请在 Telegram 群聊中使用此命令")
+            return
+
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        if member.status not in {ChatMember.ADMINISTRATOR, ChatMember.OWNER}:
+            await msg.reply_text("只有群聊管理员可以设置其他 Bot 消息转发")
+            return
+
+        args = context.args or []
+        if len(args) > 1 or (args and args[0].lower() not in {"on", "off"}):
+            await msg.reply_text("用法：/bot_forward [on|off]")
+            return
+        if not args:
+            enabled = await sql.get_bot_forward_enabled(chat.id)
+            if enabled is None:
+                await msg.reply_text("当前群聊尚未绑定 OneBot 群")
+                return
+            await msg.reply_text(f"其他 Bot 消息转发已{'开启' if enabled else '关闭'}")
+            return
+
+        enabled = args[0].lower() == "on"
+        if not await sql.set_bot_forward_enabled(chat.id, enabled):
+            await msg.reply_text("当前群聊尚未绑定 OneBot 群")
+            return
+        await msg.reply_text(f"其他 Bot 消息转发已{'开启' if enabled else '关闭'}")
+
+    @staticmethod
+    async def _can_forward_sender(msg: Message, bot_id: int | None) -> bool:
+        sender = msg.from_user
+        if sender is None or not getattr(sender, "is_bot", False):
+            return True
+        if bot_id is not None and sender.id == bot_id:
+            return False
+        return bool(await sql.get_bot_forward_enabled(msg.chat_id))
+
     async def undo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """撤回被回复消息在 Telegram 和 OneBot 两侧的对应消息。"""
         msg = update.effective_message
@@ -385,11 +428,22 @@ class TGhandlers:
         await msg.reply_text(reply_text)
 
     async def receive_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """把 Telegram 群中的非命令文本转换为 TelegramMessage。"""
+        """把 Telegram 群中的文本转换为 TelegramMessage。"""
+        await self._receive_text(update, context, bot_forward_required=False)
+
+    async def _receive_text(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        bot_forward_required: bool,
+    ) -> None:
         msg = update.effective_message
         if msg is None:
             return
         if not await sql.get_tg_forward_enabled(msg.chat_id):
+            return
+        if not await self._can_forward_sender(msg, context.bot.id):
             return
         user_id = msg.from_user.id if msg.from_user is not None else 0
         sender_name = msg.from_user.full_name if msg.from_user is not None else f"Telegram用户 {user_id}"
@@ -400,12 +454,30 @@ class TGhandlers:
             user_id=user_id,
             sender_name=sender_name,
             text=msg.text,
+            bot_forward_required=(
+                bot_forward_required
+                or bool(
+                    msg.from_user is not None
+                    and getattr(msg.from_user, "is_bot", False)
+                )
+            ),
             forwarded_from=forward_origin_name(getattr(msg, "forward_origin", None)),
             reply_message_id=(
                 msg.reply_to_message.message_id if msg.reply_to_message is not None else None
             ),
         )
         await message_bus.put(telegram_forward_task(message, q_gateway, context.bot))
+
+    async def receive_command(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """在其他 Bot 消息转发开启时转发未由本 Bot 处理的命令。"""
+        msg = update.effective_message
+        if msg is None or not await sql.get_bot_forward_enabled(msg.chat_id):
+            return
+        await self._receive_text(update, context, bot_forward_required=True)
 
     async def receive_pinned_message(
         self,
@@ -458,7 +530,7 @@ class TGhandlers:
             return
         if msg.media_group_id is None:
             try:
-                await self._enqueue_media([msg])
+                await self._enqueue_media([msg], context.bot.id)
             except ValueError as error:
                 await msg.reply_text(str(error))
             return
@@ -481,7 +553,7 @@ class TGhandlers:
             messages = self._albums.pop(media_group_id, [])
             if messages:
                 try:
-                    await self._enqueue_media(messages)
+                    await self._enqueue_media(messages, messages[0].get_bot().id)
                 except ValueError as error:
                     await messages[0].reply_text(str(error))
         finally:
@@ -489,7 +561,7 @@ class TGhandlers:
             self._albums.pop(media_group_id, None)
             self._album_tasks.pop(media_group_id, None)
 
-    async def _enqueue_media(self, messages: list[Message]) -> None:
+    async def _enqueue_media(self, messages: list[Message], bot_id: int | None = None) -> None:
         """下载一组 Telegram 媒体，取得资源预算后放入消息队列。
 
          Telegram 的 Message.photo 是同一张照片的多个尺寸，不是多张照片；这里
@@ -504,6 +576,8 @@ class TGhandlers:
 
         first = messages[0]
         if not await sql.get_tg_forward_enabled(first.chat_id):
+            return
+        if not await self._can_forward_sender(first, bot_id):
             return
         user_id = first.from_user.id if first.from_user is not None else 0
         sender_name = first.from_user.full_name if first.from_user is not None else f"Telegram用户 {user_id}"
@@ -639,37 +713,41 @@ class TGhandlers:
                 reserved_bytes = total_size
             try:
                 message = TelegramMessage(
-                        message_ids=tuple(message.message_id for message in messages),
-                        group_id=first.chat_id,
-                        user_id=user_id,
-                        sender_name=sender_name,
-                        text=next((message.caption for message in messages if message.caption), None),
-                        forwarded_from=next(
-                            (
-                                name
-                                for message in messages
-                                if (
-                                    name := forward_origin_name(
-                                        getattr(message, "forward_origin", None)
-                                    )
+                    message_ids=tuple(message.message_id for message in messages),
+                    group_id=first.chat_id,
+                    user_id=user_id,
+                    sender_name=sender_name,
+                    text=next((message.caption for message in messages if message.caption), None),
+                    bot_forward_required=bool(
+                        first.from_user is not None
+                        and getattr(first.from_user, "is_bot", False)
+                    ),
+                    forwarded_from=next(
+                        (
+                            name
+                            for message in messages
+                            if (
+                                name := forward_origin_name(
+                                    getattr(message, "forward_origin", None)
                                 )
-                                is not None
-                            ),
-                            None,
+                            )
+                            is not None
                         ),
-                        reply_message_id=next(
-                            (
-                                message.reply_to_message.message_id
-                                for message in messages
-                                if message.reply_to_message is not None
-                            ),
-                            None,
+                        None,
+                    ),
+                    reply_message_id=next(
+                        (
+                            message.reply_to_message.message_id
+                            for message in messages
+                            if message.reply_to_message is not None
                         ),
-                        # 媒体组 caption 通常只附在其中一项，取第一条非空文本。
-                        media=tuple(media),
-                        # 视频转码可能改变大小，预处理完成前保留最坏情况预算。
-                        queue_bytes=reserved_bytes,
-                    )
+                        None,
+                    ),
+                    # 媒体组 caption 通常只附在其中一项，取第一条非空文本。
+                    media=tuple(media),
+                    # 视频转码可能改变大小，预处理完成前保留最坏情况预算。
+                    queue_bytes=reserved_bytes,
+                )
                 if needs_processing:
                     task = telegram_processing_task(message, q_gateway, first.get_bot())
                     if not media_processor.submit(task):
@@ -713,10 +791,15 @@ class TGhandlers:
             CommandHandler("bind", self.bind),
             CommandHandler("unbind", self.unbind),
             CommandHandler("forward", self.forward),
+            CommandHandler("bot_forward", self.bot_forward),
             CommandHandler("id_show", self.id_show),
             CommandHandler("undo", self.undo),
             CommandHandler("unpin", self.unpin),
             CommandHandler("status", self.get_status),
+            MessageHandler(
+                filters.ChatType.GROUPS & filters.TEXT & filters.COMMAND,
+                self.receive_command,
+            ),
             MessageHandler(
                 filters.ChatType.GROUPS & filters.StatusUpdate.PINNED_MESSAGE,
                 self.receive_pinned_message,

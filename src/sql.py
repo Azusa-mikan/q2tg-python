@@ -184,6 +184,19 @@ class Sql:
             group_mappings.c.tg_forward_enabled,
         )
 
+    async def set_bot_forward_enabled(self, tg_chat_id: int, enabled: bool) -> bool:
+        return await self._set_group_flag(
+            tg_chat_id,
+            group_mappings.c.bot_forward_enabled,
+            enabled,
+        )
+
+    async def get_bot_forward_enabled(self, tg_chat_id: int) -> bool | None:
+        return await self._get_group_flag(
+            tg_chat_id,
+            group_mappings.c.bot_forward_enabled,
+        )
+
     async def set_id_show_enabled(self, tg_chat_id: int, enabled: bool) -> bool:
         return await self._set_group_flag(
             tg_chat_id,

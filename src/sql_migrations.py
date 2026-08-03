@@ -14,7 +14,8 @@ from src.paths import PROJECT_ROOT
 LEGACY_REVISION = "0001_legacy_schema"
 CURRENT_REVISION = "0002_onebot_message_mappings"
 INDEX_REVISION = "0003_mapping_id_index"
-HEAD_REVISION = "0004_application_settings"
+SETTINGS_REVISION = "0004_application_settings"
+HEAD_REVISION = "0005_bot_forward"
 LEGACY_TABLES = {
     "group_mappings",
     "message_mappings",
@@ -26,11 +27,15 @@ HEAD_TABLES = CURRENT_TABLES | {"application_settings"}
 
 def migrate_database(database_url: URL) -> None:
     """同步入口；由应用在线程中调用，内部运行异步数据库检查。"""
-    tables, indexes, user_version = asyncio.run(_inspect_database(database_url))
-    _upgrade_database(database_url, tables, indexes, user_version)
+    tables, indexes, group_columns, user_version = asyncio.run(
+        _inspect_database(database_url)
+    )
+    _upgrade_database(database_url, tables, indexes, group_columns, user_version)
 
 
-async def _inspect_database(database_url: URL) -> tuple[set[str], set[str], int]:
+async def _inspect_database(
+    database_url: URL,
+) -> tuple[set[str], set[str], set[str], int]:
     if database_url.get_backend_name() == "sqlite" and database_url.database:
         Path(database_url.database).parent.mkdir(parents=True, exist_ok=True)
 
@@ -39,6 +44,14 @@ async def _inspect_database(database_url: URL) -> tuple[set[str], set[str], int]
         async with engine.connect() as connection:
             tables = set(await connection.run_sync(lambda sync: sa.inspect(sync).get_table_names()))
             indexes: set[str] = set()
+            group_columns: set[str] = set()
+            if "group_mappings" in tables:
+                group_columns = await connection.run_sync(
+                    lambda sync: {
+                        column["name"]
+                        for column in sa.inspect(sync).get_columns("group_mappings")
+                    }
+                )
             if "telegram_message_mappings" in tables:
                 index_names = await connection.run_sync(
                     lambda sync: {
@@ -56,13 +69,14 @@ async def _inspect_database(database_url: URL) -> tuple[set[str], set[str], int]
                 )
     finally:
         await engine.dispose()
-    return tables, indexes, user_version
+    return tables, indexes, group_columns, user_version
 
 
 def _upgrade_database(
     database_url: URL,
     tables: set[str],
     indexes: set[str],
+    group_columns: set[str],
     user_version: int,
 ) -> None:
     config = Config(PROJECT_ROOT / "alembic.ini")
@@ -86,7 +100,11 @@ def _upgrade_database(
         application_tables == CURRENT_TABLES or application_tables == HEAD_TABLES
     ) and user_version == 1:
         if application_tables == HEAD_TABLES:
-            revision = HEAD_REVISION
+            revision = (
+                HEAD_REVISION
+                if "bot_forward_enabled" in group_columns
+                else SETTINGS_REVISION
+            )
         elif "telegram_message_mappings_mapping_id" in indexes:
             revision = INDEX_REVISION
         else:

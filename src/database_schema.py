@@ -26,6 +26,12 @@ group_mappings = sa.Table(
         server_default=sa.true(),
     ),
     sa.Column(
+        "bot_forward_enabled",
+        sa.Boolean(),
+        nullable=False,
+        server_default=sa.false(),
+    ),
+    sa.Column(
         "id_show_enabled",
         sa.Boolean(),
         nullable=False,
