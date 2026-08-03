@@ -567,6 +567,7 @@ async def receive_onebot_event(
         message_id=message_id,
         group_id=group_id,
         user_id=user_id,
+        self_id=self_id,
         sender_name=sender_name,
         sender_name_is_fallback=sender_name_is_fallback,
         message=segments,

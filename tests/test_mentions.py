@@ -153,6 +153,22 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(text, "@101")
 
+    async def test_self_mention_is_removed(self) -> None:
+        gateway = SimpleNamespace(get_group_member_info=AsyncMock())
+
+        text = await onebot_message_text(
+            [
+                {"type": "at", "data": {"qq": "999"}},
+                {"type": "text", "data": {"text": " 把你妈妈抓走"}},
+            ],
+            123,
+            cast(QGateway, gateway),
+            self_id=999,
+        )
+
+        self.assertEqual(text, "把你妈妈抓走")
+        gateway.get_group_member_info.assert_not_awaited()
+
     async def test_onebot_mention_is_visible_in_telegram_message(self) -> None:
         bot = SimpleNamespace(
             send_message=AsyncMock(return_value=SimpleNamespace(message_id=201))
@@ -195,7 +211,7 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
                     cast(QGateway, gateway),
                 )
 
-        self.assertEqual(bot.send_message.await_args.kwargs["text"], "OneBot User:\n@Bot Name ")
+        self.assertEqual(bot.send_message.await_args.kwargs["text"], "OneBot User:\n@Bot Name")
 
 
 if __name__ == "__main__":

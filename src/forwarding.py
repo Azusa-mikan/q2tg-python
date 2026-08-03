@@ -117,6 +117,7 @@ async def onebot_message_text(
     id_show_enabled: bool = False,
     member_names: dict[int, str | None] | None = None,
     markdown_v2: bool = False,
+    self_id: int | None = None,
 ) -> str:
     """按原顺序拼接 text、face 和可见的 at segment。"""
     if member_names is None:
@@ -127,6 +128,8 @@ async def onebot_message_text(
             continue
         data = segment.get("data")
         user_id = onebot_user_id(data.get("qq")) if isinstance(data, dict) else None
+        if user_id is not None and user_id == self_id:
+            continue
         if (
             user_id is not None
             and user_id not in member_names
@@ -162,6 +165,8 @@ async def onebot_message_text(
         user_id = onebot_user_id(qq)
         if user_id is None:
             continue
+        if user_id == self_id:
+            continue
         name = member_names.get(user_id)
         if name is not None:
             mention = f"{name}[{user_id}]" if id_show_enabled else name
@@ -169,7 +174,7 @@ async def onebot_message_text(
             mention = str(user_id) if id_show_enabled else ONEBOT_USER_NAME
         mention = f"@{mention}"
         parts.append(escape_markdown(mention, version=2) if markdown_v2 else mention)
-    return "".join(parts)
+    return "".join(parts).strip()
 
 
 async def _onebot_member_name(
@@ -370,6 +375,7 @@ async def forward_onebot_to_telegram(
         id_show_enabled=id_show_enabled,
         member_names=msg.mention_names,
         markdown_v2=markdown_v2,
+        self_id=msg.self_id,
     )
     forward_links: list[str] = []
     for segment in normalized_message:

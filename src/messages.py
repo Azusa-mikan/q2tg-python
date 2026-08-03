@@ -55,6 +55,7 @@ class OneBotMessage:
     user_id: int
     sender_name: str
     message: list[dict[Any, Any]]
+    self_id: int | None = None
     sender_name_is_fallback: bool = False
     reply_message_id: int | None = None
     # Telegram 发送可能在多媒体中途失败。进度保存在任务 DTO 中，使重试不会
