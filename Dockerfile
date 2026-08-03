@@ -20,8 +20,20 @@ RUN apt-get update \
 # 先只复制依赖清单，源码变化不会使依赖层缓存失效。
 COPY pyproject.toml uv.lock ./
 
+# pilk 只提供 sdist，需在本阶段现场编译。--refresh-package 让它忽略可能来自
+# 其他 libc（如 alpine/musl）的旧构建缓存，避免复用不匹配当前 glibc 的扩展。
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-install-project
+    uv sync --locked --no-dev --no-install-project --refresh-package pilk
+
+# 校验 pilk 原生扩展确实为当前 glibc 环境编译（后缀应为 *-linux-gnu.so）。
+# 若命中跨 libc 的旧缓存会得到 *-musl.so，运行时无法加载，这里提前失败。
+RUN set -eu; \
+    so="$(find /app/.venv -name '_pilk*.so' -print -quit)"; \
+    if [ -z "$so" ]; then echo "pilk 原生扩展缺失" >&2; exit 1; fi; \
+    case "$so" in \
+        *-linux-gnu.so) echo "pilk 扩展就绪: $so" ;; \
+        *) echo "pilk 扩展 libc 不匹配: $so" >&2; exit 1 ;; \
+    esac
 
 FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-trixie-slim AS runtime
 
