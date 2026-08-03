@@ -46,6 +46,7 @@ from src.messages import (
     SendLane,
     SendTarget,
     SendTask,
+    TelegramGroupMemberEvent,
     TelegramMessage,
 )
 from src.notice import (
@@ -1120,6 +1121,46 @@ def telegram_pin_task(
         failure_action=_onebot_failure_action,
         max_attempts=MAX_SEND_ATTEMPTS,
         label=f"telegram-pin:{tg_chat_id}:{tg_message_id}",
+    )
+
+
+async def forward_telegram_group_member_to_onebot(
+    event: TelegramGroupMemberEvent,
+    gateway: QGateway,
+) -> None:
+    """把 Telegram 群成员加入或退出事件格式化为 OneBot 文本消息。"""
+    q_group_id = await sql.get_q_group(event.group_id)
+    if q_group_id is None:
+        baselog.warning("Telegram 群事件未配置转发目标: %s", event.group_id)
+        return
+    if not await sql.get_tg_forward_enabled(event.group_id):
+        return
+    action = "加入了群聊" if event.joined else "退出了群聊"
+    text = "\n".join(f"{name} {action}" for name in event.member_names)
+    try:
+        await gateway.send_group_message(
+            group_id=q_group_id,
+            message=[{"type": "text", "data": {"text": text}}],
+        )
+    except OneBotConnectionError:
+        raise
+    except Exception as error:
+        raise OneBotSendError from error
+
+
+def telegram_group_member_task(
+    event: TelegramGroupMemberEvent,
+    gateway: QGateway,
+) -> SendTask:
+    """创建发送到 OneBot 事件队列的 Telegram 群成员变动任务。"""
+    action = "increase" if event.joined else "decrease"
+    return SendTask(
+        target=SendTarget.ONEBOT,
+        lane=SendLane.EVENT,
+        send=partial(forward_telegram_group_member_to_onebot, event, gateway),
+        failure_action=_onebot_failure_action,
+        max_attempts=MAX_SEND_ATTEMPTS,
+        label=f"telegram-group-{action}:{event.group_id}",
     )
 
 

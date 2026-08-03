@@ -63,6 +63,15 @@ class OneBotGroupMemberEvent:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class TelegramGroupMemberEvent:
+    """经过入口校验的 Telegram 群成员加入或退出事件。"""
+
+    group_id: int
+    member_names: tuple[str, ...]
+    joined: bool
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class OneBotPokeEvent:
     """经过入口校验的 OneBot 群戳一戳事件。"""
 

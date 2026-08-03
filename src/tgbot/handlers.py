@@ -28,11 +28,12 @@ from src.bus import message_bus
 from src.config import config
 from src.forwarding import (
     telegram_forward_task,
+    telegram_group_member_task,
     telegram_pin_task,
     telegram_processing_task,
 )
 from src.media import MediaFile, media_item_budget, media_queue_budget
-from src.messages import TelegramMedia, TelegramMessage
+from src.messages import TelegramGroupMemberEvent, TelegramMedia, TelegramMessage
 from src.notice import enqueue_bridge_notice
 from src.processing import media_processor
 from src.qbot import q_gateway
@@ -422,6 +423,34 @@ class TGhandlers:
             telegram_pin_task(msg.chat_id, msg.pinned_message.message_id, q_gateway)
         )
 
+    async def receive_group_member(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """把 Telegram 群成员加入或退出服务消息交给 OneBot 事件队列。"""
+        msg = update.effective_message
+        if msg is None or not await sql.get_tg_forward_enabled(msg.chat_id):
+            return
+        if msg.new_chat_members:
+            members = msg.new_chat_members
+            joined = True
+        elif msg.left_chat_member is not None:
+            members = (msg.left_chat_member,)
+            joined = False
+        else:
+            return
+        await message_bus.put(
+            telegram_group_member_task(
+                TelegramGroupMemberEvent(
+                    group_id=msg.chat_id,
+                    member_names=tuple(member.full_name for member in members),
+                    joined=joined,
+                ),
+                q_gateway,
+            )
+        )
+
     async def receive_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """处理单个图片、视频、语音或文件，或按 media_group_id 收集媒体组。"""
         msg = update.effective_message
@@ -688,6 +717,14 @@ class TGhandlers:
             MessageHandler(
                 filters.ChatType.GROUPS & filters.StatusUpdate.PINNED_MESSAGE,
                 self.receive_pinned_message,
+            ),
+            MessageHandler(
+                filters.ChatType.GROUPS
+                & (
+                    filters.StatusUpdate.NEW_CHAT_MEMBERS
+                    | filters.StatusUpdate.LEFT_CHAT_MEMBER
+                ),
+                self.receive_group_member,
             ),
             MessageHandler(
                 filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
