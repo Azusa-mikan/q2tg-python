@@ -60,7 +60,7 @@ class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
             message_id=1,
             group_id=123,
             user_id=2,
-            sender_name="Onebot User",
+            sender_name="OneBot User",
             message=[{"type": "text", "data": {"text": "message"}}],
         )
         task = onebot_forward_task(message, bot, client, cast(QGateway, gateway))
@@ -151,7 +151,7 @@ class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
         await send()
         bot.send_message.assert_awaited_once_with(
             chat_id=-456,
-            text="消息发送到 Onebot 失败，请稍后重试。",
+            text="消息发送到 OneBot 失败，请稍后重试。",
         )
 
     async def test_oversized_onebot_media_drops_and_reports_exact_reason(self) -> None:
@@ -163,7 +163,7 @@ class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
             message_id=1,
             group_id=123,
             user_id=2,
-            sender_name="Onebot User",
+            sender_name="OneBot User",
             message=[{"type": "image", "data": {"url": "https://example.test/image"}}],
         )
         task = onebot_forward_task(
@@ -172,7 +172,7 @@ class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
             cast(httpx.AsyncClient, SimpleNamespace()),
             gateway,
         )
-        error = MediaTooLargeError("Onebot 媒体超过 20 MB，无法转发")
+        error = MediaTooLargeError("OneBot 媒体超过 20 MB，无法转发")
 
         self.assertIs(task.failure_action(error), FailureAction.DROP)
         with patch("src.forwarding.enqueue_onebot_notice") as notice:
@@ -182,7 +182,7 @@ class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
         notice.assert_called_once_with(
             gateway,
             q_group_id=123,
-            text="Onebot 媒体超过 20 MB，无法转发",
+            text="OneBot 媒体超过 20 MB，无法转发",
         )
 
     async def test_telegram_timeout_is_not_retried_and_reports_unknown_result(self) -> None:
@@ -192,7 +192,7 @@ class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
             message_id=2,
             group_id=123,
             user_id=2,
-            sender_name="Onebot User",
+            sender_name="OneBot User",
             message=[{"type": "video", "data": {"url": "https://example.test/video"}}],
         )
         task = onebot_forward_task(

@@ -1,4 +1,4 @@
-"""把 Telegram 视频规范化为 Onebot 客户端普遍可播放的 MP4。"""
+"""把 Telegram 视频规范化为 OneBot 客户端普遍可播放的 MP4。"""
 
 import asyncio
 import json
@@ -7,7 +7,12 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from src.log import baselog
-from src.media import STREAM_CHUNK_SIZE, MediaFile
+from src.media import (
+    MediaFile,
+    communicate_media_process,
+    replace_media_content,
+    start_media_process,
+)
 from src.paths import ensure_temp_dir
 
 PROBE_TIMEOUT = 30
@@ -17,7 +22,7 @@ TRANSCODE_TIMEOUT = 300
 async def normalize_video_for_onebot(media: MediaFile, *, size_limit: int) -> None:
     """按需将视频原地替换为 H.264 + AAC MP4。
 
-    Telegram 接受 HEVC MP4，但部分 Onebot 客户端播放时会黑屏；如果客户端显示
+    Telegram 接受 HEVC MP4，但部分 OneBot 客户端播放时会黑屏；如果客户端显示
     “视频已过期”，应升级 SnowLuma。
     已兼容的 H.264/AAC 文件保持原样；其它编码通过 ffmpeg 转码。转码结果先写入
     独立临时路径，成功且未超限后再覆盖原 MediaFile，异常时原文件保持可清理。
@@ -36,7 +41,7 @@ async def normalize_video_for_onebot(media: MediaFile, *, size_limit: int) -> No
     try:
         input_fd = media.file.fileno()
         media.rewind()
-        process = await _start_process(
+        process = await start_media_process(
             "ffmpeg",
             "-nostdin",
             "-hide_banner",
@@ -65,14 +70,19 @@ async def normalize_video_for_onebot(media: MediaFile, *, size_limit: int) -> No
             str(size_limit + 1),
             str(output_path),
             pass_fds=(input_fd,),
+            missing_error="视频转发需要安装 ffmpeg 和 ffprobe",
         )
-        _, stderr = await _communicate(process, timeout=TRANSCODE_TIMEOUT)
+        _, stderr = await communicate_media_process(
+            process,
+            timeout=TRANSCODE_TIMEOUT,
+            timeout_error="Telegram 视频处理超时",
+        )
         if process.returncode != 0:
             raise ValueError(f"Telegram 视频转码失败: {_safe_error(stderr)}")
         if output_path.stat().st_size > size_limit:
             raise ValueError("Telegram 视频转码后超过 20 MB 上限")
 
-        await asyncio.to_thread(_replace_media_content, media, output_path)
+        await asyncio.to_thread(replace_media_content, media, output_path)
         media.filename = f"{Path(media.filename).stem or 'video'}.mp4"
         media.media_type = "video/mp4"
         baselog.info("视频转码完成，耗时 %.2f 秒", time.monotonic() - started_at)
@@ -83,7 +93,7 @@ async def normalize_video_for_onebot(media: MediaFile, *, size_limit: int) -> No
 async def _probe_codecs(media: MediaFile) -> tuple[str | None, tuple[str, ...]]:
     input_fd = media.file.fileno()
     media.rewind()
-    process = await _start_process(
+    process = await start_media_process(
         "ffprobe",
         "-v",
         "error",
@@ -94,8 +104,13 @@ async def _probe_codecs(media: MediaFile) -> tuple[str | None, tuple[str, ...]]:
         f"/proc/self/fd/{input_fd}",
         pass_fds=(input_fd,),
         stdout=asyncio.subprocess.PIPE,
+        missing_error="视频转发需要安装 ffmpeg 和 ffprobe",
     )
-    stdout, stderr = await _communicate(process, timeout=PROBE_TIMEOUT)
+    stdout, stderr = await communicate_media_process(
+        process,
+        timeout=PROBE_TIMEOUT,
+        timeout_error="Telegram 视频处理超时",
+    )
     if process.returncode != 0:
         raise ValueError(f"Telegram 视频格式检测失败: {_safe_error(stderr)}")
     try:
@@ -119,43 +134,6 @@ async def _probe_codecs(media: MediaFile) -> tuple[str | None, tuple[str, ...]]:
     if video_codec is None:
         raise ValueError("Telegram 视频中没有可用的视频流")
     return video_codec, audio_codecs
-
-
-async def _start_process(*args: str, **kwargs) -> asyncio.subprocess.Process:
-    try:
-        return await asyncio.create_subprocess_exec(
-            *args,
-            stderr=asyncio.subprocess.PIPE,
-            **kwargs,
-        )
-    except FileNotFoundError:
-        raise ValueError("视频转发需要安装 ffmpeg 和 ffprobe") from None
-
-
-async def _communicate(
-    process: asyncio.subprocess.Process,
-    *,
-    timeout: int,
-) -> tuple[bytes, bytes]:
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-    except BaseException:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-        raise
-    return stdout or b"", stderr or b""
-
-
-def _replace_media_content(media: MediaFile, output_path: Path) -> None:
-    """在工作线程中把转码结果分块覆盖回 spool。"""
-    media.file.seek(0)
-    media.file.truncate()
-    media.size = 0
-    with output_path.open("rb") as converted:
-        while chunk := converted.read(STREAM_CHUNK_SIZE):
-            media.write(chunk)
-    media.rewind()
 
 
 def _safe_error(stderr: bytes) -> str:

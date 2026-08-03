@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 from secrets import token_hex
 from typing import TYPE_CHECKING, Any
 
 from src.face import render_onebot_face
 from src.log import baselog
-from src.messages import ONEBOT_USER_NAME, TelegraphPageRef
+from src.messages import (
+    ONEBOT_USER_NAME,
+    TelegraphPageRef,
+    is_http_url,
+    onebot_user_id,
+    onebot_user_name,
+)
 from src.telegraph_client import TelegraphClient
 
 if TYPE_CHECKING:
@@ -15,6 +22,7 @@ if TYPE_CHECKING:
 
 MAX_FORWARD_DEPTH = 3
 MAX_FORWARD_MESSAGES = 500
+MAX_STRANGER_LOOKUPS = 8
 UNSUPPORTED_FORWARD = "[合并转发]该消息不支持查看"
 
 
@@ -31,6 +39,8 @@ class ForwardPageBuilder:
         self.message_count = 0
         self.pages: dict[str, TelegraphPageRef] = {}
         self.active_ids: set[str] = set()
+        self.stranger_names: dict[int, str | None] = {}
+        self.stranger_lookup_slots = asyncio.Semaphore(MAX_STRANGER_LOOKUPS)
 
     async def create(self, forward_id: str) -> TelegraphPageRef:
         return await self._create_page(forward_id, depth=1)
@@ -61,22 +71,17 @@ class ForwardPageBuilder:
         depth: int,
     ) -> list[dict[str, Any]]:
         nodes: list[dict[str, Any]] = []
+        remaining = max(MAX_FORWARD_MESSAGES - self.message_count, 0)
+        await self._cache_stranger_names(messages[:remaining])
         for message in messages:
             self.message_count += 1
             if self.message_count > MAX_FORWARD_MESSAGES:
                 nodes.append(self._quote("[合并转发消息过多，后续内容已省略]"))
                 break
             sender = message.get("sender")
-            card = sender.get("card") if isinstance(sender, dict) else None
-            nickname = sender.get("nickname") if isinstance(sender, dict) else None
-            name = next(
-                (
-                    value.strip()
-                    for value in (card, nickname)
-                    if isinstance(value, str) and value.strip()
-                ),
-                ONEBOT_USER_NAME,
-            )
+            name = (
+                onebot_user_name(sender) if isinstance(sender, dict) else None
+            ) or ONEBOT_USER_NAME
             nodes.append(
                 {
                     "tag": "p",
@@ -122,7 +127,16 @@ class ForwardPageBuilder:
                     text_parts.append(render_onebot_face(face_id))
             elif kind == "at":
                 target = data.get("qq")
-                text_parts.append("@全体成员" if target == "all" else f"@{target}")
+                if target == "all":
+                    text_parts.append("@全体成员")
+                    continue
+                user_id = onebot_user_id(target)
+                if user_id is None:
+                    text_parts.append(f"@{ONEBOT_USER_NAME}")
+                    continue
+                name = await self._stranger_name(user_id)
+                # Telegraph 页面永久隐藏数字 ID，不受群级 id_show 设置影响。
+                text_parts.append(f"@{name or ONEBOT_USER_NAME}")
             elif kind in {"image", "video"}:
                 flush_text()
                 nodes.append(await self._media_node(kind, data))
@@ -151,9 +165,46 @@ class ForwardPageBuilder:
         flush_text()
         return nodes
 
+    async def _stranger_name(self, user_id: int) -> str | None:
+        if user_id in self.stranger_names:
+            return self.stranger_names[user_id]
+        async with self.stranger_lookup_slots:
+            try:
+                stranger = await self.gateway.get_stranger_info(user_id)
+            except Exception:  # noqa: BLE001
+                baselog.warning("OneBot 陌生人资料查询失败: user=%s", user_id)
+                name = None
+            else:
+                nickname = stranger.get("nickname")
+                name = (
+                    nickname.strip()
+                    if isinstance(nickname, str) and nickname.strip()
+                    else None
+                )
+        self.stranger_names[user_id] = name
+        return name
+
+    async def _cache_stranger_names(self, messages: list[dict[str, Any]]) -> None:
+        user_ids: set[int] = set()
+        for message in messages:
+            segments = message.get("message")
+            if not isinstance(segments, list):
+                continue
+            for segment in segments:
+                if not isinstance(segment, dict) or segment.get("type") != "at":
+                    continue
+                data = segment.get("data")
+                if not isinstance(data, dict) or data.get("qq") == "all":
+                    continue
+                user_id = onebot_user_id(data.get("qq"))
+                if user_id is not None and user_id not in self.stranger_names:
+                    user_ids.add(user_id)
+        if user_ids:
+            await asyncio.gather(*(self._stranger_name(user_id) for user_id in user_ids))
+
     async def _media_node(self, kind: str, data: dict[str, Any]) -> dict[str, Any]:
         url = data.get("url")
-        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        if not isinstance(url, str) or not is_http_url(url):
             return self._quote("[图片无法读取]" if kind == "image" else "[视频无法读取]")
         return {
             "tag": "img" if kind == "image" else "video",

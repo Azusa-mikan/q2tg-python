@@ -1,11 +1,15 @@
 """临时媒体文件、读取租约以及文件数量/字节数背压工具。"""
 
+from __future__ import annotations
+
 import asyncio
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from secrets import token_urlsafe
 from tempfile import SpooledTemporaryFile
+from typing import Any
 
 from src.paths import ensure_temp_dir
 
@@ -17,6 +21,55 @@ MEDIA_QUEUE_MAX_BYTES = 512 * 1024 * 1024
 MEDIA_CACHE_MAX_BYTES = 512 * 1024 * 1024
 MEDIA_CACHE_TTL = 120
 STREAM_CHUNK_SIZE = 256 * 1024
+
+
+async def start_media_process(
+    *args: str,
+    missing_error: str,
+    **kwargs: Any,
+) -> asyncio.subprocess.Process:
+    """启动媒体子进程，并隐藏可执行文件缺失的底层路径信息。"""
+    try:
+        return await asyncio.create_subprocess_exec(
+            *args,
+            stderr=asyncio.subprocess.PIPE,
+            **kwargs,
+        )
+    except FileNotFoundError:
+        raise ValueError(missing_error) from None
+
+
+async def communicate_media_process(
+    process: asyncio.subprocess.Process,
+    *,
+    timeout: int,
+    timeout_error: str,
+) -> tuple[bytes, bytes]:
+    """等待媒体子进程，并在超时、取消或异常时确保进程已回收。"""
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except TimeoutError:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise ValueError(timeout_error) from None
+    except BaseException:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
+    return stdout or b"", stderr or b""
+
+
+def replace_media_content(media: MediaFile, output_path: Path) -> None:
+    """用临时输出文件分块覆盖 MediaFile。"""
+    media.file.seek(0)
+    media.file.truncate()
+    media.size = 0
+    with output_path.open("rb") as converted:
+        while chunk := converted.read(STREAM_CHUNK_SIZE):
+            media.write(chunk)
+    media.rewind()
 
 
 class ByteBudget:
@@ -127,7 +180,7 @@ class MediaFile:
         *,
         filename: str = "image",
         media_type: str = "application/octet-stream",
-    ) -> "MediaFile":
+    ) -> MediaFile:
         # 普通创建路径自行申请一个全局文件名额。
         await media_item_budget.acquire()
         try:
@@ -152,7 +205,7 @@ class MediaFile:
         *,
         filename: str = "image",
         media_type: str = "application/octet-stream",
-    ) -> "MediaFile":
+    ) -> MediaFile:
         # 调用方已批量取得 ItemBudget；这里不能再次 acquire。
         return cls(
             SpooledTemporaryFile(
@@ -178,7 +231,7 @@ class MediaFile:
             raise ValueError("媒体文件已关闭")
         self.file.seek(0)
 
-    def chunks(self) -> "MediaStream":
+    def chunks(self) -> MediaStream:
         if self._closed or self._close_pending:
             raise ValueError("媒体文件已关闭")
         # 每个 HTTP 响应取得一个租约。即使还未读取第一个 chunk，响应取消时
@@ -229,7 +282,7 @@ class MediaStream(AsyncIterator[bytes]):
         self._started = False
         self._closed = False
 
-    def __aiter__(self) -> "MediaStream":
+    def __aiter__(self) -> MediaStream:
         return self
 
     async def __anext__(self) -> bytes:

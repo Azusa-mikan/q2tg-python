@@ -1,3 +1,4 @@
+import asyncio
 import re
 import unittest
 from types import SimpleNamespace
@@ -5,7 +6,11 @@ from typing import cast
 from unittest.mock import AsyncMock
 
 from src.messages import TelegraphPageRef
-from src.onebot_forward import UNSUPPORTED_FORWARD, ForwardPageBuilder
+from src.onebot_forward import (
+    MAX_FORWARD_MESSAGES,
+    UNSUPPORTED_FORWARD,
+    ForwardPageBuilder,
+)
 from src.qbot import QGateway
 from src.telegraph_client import TelegraphClient
 
@@ -68,6 +73,138 @@ class OneBotForwardPageTests(unittest.IsolatedAsyncioTestCase):
 
         content = telegraph.create_page.await_args.args[1]
         self.assertIn({"tag": "p", "children": ["OneBot 用户:"]}, content)
+
+    async def test_at_uses_stranger_nickname_and_never_shows_id(self) -> None:
+        gateway = SimpleNamespace(
+            get_forward_messages=AsyncMock(
+                return_value=[
+                    {
+                        "message_type": "group",
+                        "sender": {"nickname": "Example Sender"},
+                        "message": [
+                            {"type": "at", "data": {"qq": "820001"}},
+                            {"type": "at", "data": {"qq": 820001}},
+                        ],
+                    }
+                ]
+            ),
+            get_stranger_info=AsyncMock(
+                return_value={"user_id": 820001, "nickname": "Example Target"}
+            ),
+        )
+        telegraph = SimpleNamespace(create_page=AsyncMock(return_value="https://telegra.ph/x"))
+        builder = ForwardPageBuilder(
+            cast(QGateway, gateway),
+            cast(TelegraphClient, telegraph),
+        )
+
+        await builder.create("root")
+
+        content = telegraph.create_page.await_args.args[1]
+        self.assertIn(
+            {"tag": "blockquote", "children": ["@Example Target@Example Target"]},
+            content,
+        )
+        self.assertNotIn("820001", repr(content))
+        gateway.get_stranger_info.assert_awaited_once_with(820001)
+
+    async def test_at_lookup_failure_reuses_onebot_user_name(self) -> None:
+        gateway = SimpleNamespace(
+            get_forward_messages=AsyncMock(
+                return_value=[
+                    {
+                        "message_type": "group",
+                        "sender": {"nickname": "Example Sender"},
+                        "message": [{"type": "at", "data": {"qq": "820002"}}],
+                    }
+                ]
+            ),
+            get_stranger_info=AsyncMock(side_effect=RuntimeError("failed")),
+        )
+        telegraph = SimpleNamespace(create_page=AsyncMock(return_value="https://telegra.ph/x"))
+        builder = ForwardPageBuilder(
+            cast(QGateway, gateway),
+            cast(TelegraphClient, telegraph),
+        )
+
+        await builder.create("root")
+
+        content = telegraph.create_page.await_args.args[1]
+        self.assertIn(
+            {"tag": "blockquote", "children": ["@OneBot 用户"]},
+            content,
+        )
+        self.assertNotIn("820002", repr(content))
+
+    async def test_at_lookups_run_with_bounded_concurrency(self) -> None:
+        active = 0
+        maximum = 0
+
+        async def get_stranger_info(user_id: int) -> dict[str, object]:
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return {"user_id": user_id, "nickname": f"Member {user_id}"}
+
+        gateway = SimpleNamespace(
+            get_forward_messages=AsyncMock(
+                return_value=[
+                    {
+                        "message_type": "group",
+                        "sender": {"nickname": "Example Sender"},
+                        "message": [
+                            {"type": "at", "data": {"qq": user_id}}
+                            for user_id in range(820_100, 820_112)
+                        ],
+                    }
+                ]
+            ),
+            get_stranger_info=AsyncMock(side_effect=get_stranger_info),
+        )
+        telegraph = SimpleNamespace(create_page=AsyncMock(return_value="https://telegra.ph/x"))
+        builder = ForwardPageBuilder(
+            cast(QGateway, gateway),
+            cast(TelegraphClient, telegraph),
+        )
+
+        await builder.create("root")
+
+        self.assertGreater(maximum, 1)
+        self.assertLessEqual(maximum, 8)
+
+    async def test_at_lookup_skips_messages_beyond_page_limit(self) -> None:
+        gateway = SimpleNamespace(get_stranger_info=AsyncMock())
+        telegraph = SimpleNamespace()
+        builder = ForwardPageBuilder(
+            cast(QGateway, gateway),
+            cast(TelegraphClient, telegraph),
+        )
+        builder.message_count = MAX_FORWARD_MESSAGES
+
+        nodes = await builder._messages_to_nodes(
+            [
+                {
+                    "sender": {"nickname": "Example Sender"},
+                    "message": [{"type": "at", "data": {"qq": 820_200}}],
+                }
+            ],
+            depth=1,
+        )
+
+        self.assertEqual(nodes, [builder._quote("[合并转发消息过多，后续内容已省略]")])
+        gateway.get_stranger_info.assert_not_awaited()
+
+    async def test_media_rejects_http_url_without_host(self) -> None:
+        builder = ForwardPageBuilder(
+            cast(QGateway, SimpleNamespace()),
+            cast(TelegraphClient, SimpleNamespace()),
+        )
+
+        node = await builder._media_node("image", {"url": "https:///image.png"})
+
+        self.assertEqual(node, builder._quote("[图片无法读取]"))
 
     async def test_fourth_level_is_not_requested(self) -> None:
         gateway = SimpleNamespace(

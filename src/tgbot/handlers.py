@@ -1,13 +1,26 @@
 """Telegram 命令、文本和媒体 Update 的入口处理器。"""
 
 import asyncio
+import hashlib
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from secrets import token_urlsafe
+from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from telegram import (
     ChatMember,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
+    LinkPreviewOptions,
     Message,
+    MessageEntity,
     MessageOrigin,
     MessageOriginChannel,
     MessageOriginChat,
@@ -19,6 +32,7 @@ from telegram.ext import (
     BaseHandler,
     CommandHandler,
     ContextTypes,
+    InlineQueryHandler,
     MessageHandler,
     filters,
 )
@@ -35,10 +49,12 @@ from src.forwarding import (
 from src.log import baselog
 from src.media import MediaFile, media_item_budget, media_queue_budget
 from src.messages import (
+    ONEBOT_USER_NAME,
     OneBotConnectionError,
     TelegramGroupMemberEvent,
     TelegramMedia,
     TelegramMessage,
+    onebot_user_name,
 )
 from src.notice import enqueue_bridge_notice
 from src.processing import media_processor
@@ -51,6 +67,39 @@ TELEGRAM_VIDEO_LIMIT = TELEGRAM_DOWNLOAD_LIMIT
 TELEGRAM_ALBUM_LIMIT = 10
 TELEGRAM_ALBUM_BYTES_LIMIT = 100_000_000
 DOWNLOAD_CHUNK_SIZE = 256 * 1024
+INLINE_AT_TTL = 5 * 60
+INLINE_AT_PAGE_SIZE = 50
+INLINE_AT_CONTEXT_LIMIT = 256
+INLINE_AT_SNAPSHOT_LIMIT = 64
+INLINE_AT_SELECTION_LIMIT = 4096
+INLINE_AT_URL_PREFIX = "https://q2tg.invalid/token/"
+INLINE_AT_MARKER = "\u2063"
+
+
+@dataclass(slots=True)
+class InlineAtContext:
+    """由群聊命令创建、供 Inline Query 恢复群上下文的短期令牌。"""
+
+    user_id: int
+    tg_chat_id: int
+    q_group_id: int
+    expires_at: float
+
+
+@dataclass(slots=True)
+class InlineAtMemberSnapshot:
+    members: list[dict[str, Any]]
+    expires_at: float
+
+
+@dataclass(slots=True)
+class InlineAtSelection:
+    context_token: str
+    user_id: int
+    tg_chat_id: int
+    q_group_id: int
+    q_user_id: int
+    expires_at: float
 
 
 def forward_origin_name(origin: MessageOrigin | None) -> str | None:
@@ -85,6 +134,12 @@ class TGhandlers:
 
         # 由 SnowLuma WebSocket 会话注入和关闭，handlers 不拥有该客户端的生命周期。
         self.download_client: httpx.AsyncClient | None = None
+
+        # Inline Query 不包含当前 chat_id；/at 先把绑定群写入短期随机令牌。
+        self._inline_at_contexts: dict[str, InlineAtContext] = {}
+        self._inline_at_member_snapshots: dict[int, InlineAtMemberSnapshot] = {}
+        self._inline_at_selections: dict[str, InlineAtSelection] = {}
+        self._inline_at_selection_tokens: dict[tuple[str, int], str] = {}
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """在群聊显示状态，在私聊提供管理员引导或联系方式。"""
@@ -153,7 +208,7 @@ class TGhandlers:
         try:
             groups = await q_gateway.get_group_list()
             if not any(group.get("group_id") == q_group_id for group in groups):
-                await msg.reply_text("Onebot端未找到该群聊")
+                await msg.reply_text("OneBot端未找到该群聊")
                 return
             group = await q_gateway.get_group_info(q_group_id)
             group_name = group.get("group_name")
@@ -161,7 +216,7 @@ class TGhandlers:
                 raise TypeError(f"OneBot 群资料缺少 group_name: {group!r}")
         except (OneBotConnectionError, RuntimeError, TimeoutError, TypeError):
             baselog.exception("绑定群聊时查询 OneBot 群资料失败: %s", q_group_id)
-            await msg.reply_text("Onebot 错误，请检查日志")
+            await msg.reply_text("OneBot 错误，请检查日志")
             return
 
         try:
@@ -204,7 +259,7 @@ class TGhandlers:
                 raise TypeError(f"OneBot 群资料缺少 group_name: {group!r}")
         except (OneBotConnectionError, RuntimeError, TimeoutError, TypeError):
             baselog.exception("解除绑定时查询 OneBot 群资料失败: %s", q_group_id)
-            await msg.reply_text("Onebot 错误，请检查日志")
+            await msg.reply_text("OneBot 错误，请检查日志")
             return
 
         await sql.unbind_tg_group(chat.id)
@@ -217,7 +272,7 @@ class TGhandlers:
         )
 
     async def forward(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """查询或设置当前 Telegram 群到 Onebot 的转发开关。"""
+        """查询或设置当前 Telegram 群到 OneBot 的转发开关。"""
         msg = update.effective_message
         chat = update.effective_chat
         user = update.effective_user
@@ -245,11 +300,11 @@ class TGhandlers:
             enqueue_bridge_notice(
                 partial(
                     msg.reply_text,
-                    f"当前 Telegram → Onebot 转发已{'开启' if enabled else '关闭'}",
+                    f"当前 Telegram → OneBot 转发已{'开启' if enabled else '关闭'}",
                 ),
                 q_gateway,
                 q_group_id=q_group_id,
-                text=f"当前 Telegram → Onebot 转发已{'开启' if enabled else '关闭'}",
+                text=f"当前 Telegram → OneBot 转发已{'开启' if enabled else '关闭'}",
             )
             return
 
@@ -264,15 +319,15 @@ class TGhandlers:
         enqueue_bridge_notice(
             partial(
                 msg.reply_text,
-                f"Telegram → Onebot 转发已{'开启' if enabled else '关闭'}",
+                f"Telegram → OneBot 转发已{'开启' if enabled else '关闭'}",
             ),
             q_gateway,
             q_group_id=q_group_id,
-            text=f"Telegram → Onebot 转发已{'开启' if enabled else '关闭'}",
+            text=f"Telegram → OneBot 转发已{'开启' if enabled else '关闭'}",
         )
 
     async def id_show(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """查询或设置 Onebot 用户及 @ 对象是否在 Telegram 显示数字 ID。"""
+        """查询或设置 OneBot 用户及 @ 对象是否在 Telegram 显示数字 ID。"""
         msg = update.effective_message
         chat = update.effective_chat
         user = update.effective_user
@@ -296,14 +351,14 @@ class TGhandlers:
             if enabled is None:
                 await msg.reply_text("当前群聊尚未绑定 OneBot 群")
                 return
-            await msg.reply_text(f"Onebot 用户及 @ 对象 ID 显示已{'开启' if enabled else '关闭'}")
+            await msg.reply_text(f"OneBot 用户及 @ 对象 ID 显示已{'开启' if enabled else '关闭'}")
             return
 
         enabled = args[0].lower() == "on"
         if not await sql.set_id_show_enabled(chat.id, enabled):
             await msg.reply_text("当前群聊尚未绑定 OneBot 群")
             return
-        await msg.reply_text(f"Onebot 用户及 @ 对象 ID 显示已{'开启' if enabled else '关闭'}")
+        await msg.reply_text(f"OneBot 用户及 @ 对象 ID 显示已{'开启' if enabled else '关闭'}")
 
     async def bot_forward(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """查询或设置当前 Telegram 群的其他 Bot 消息转发开关。"""
@@ -338,6 +393,250 @@ class TGhandlers:
             await msg.reply_text("当前群聊尚未绑定 OneBot 群")
             return
         await msg.reply_text(f"其他 Bot 消息转发已{'开启' if enabled else '关闭'}")
+
+    async def at(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """在当前绑定群创建 Inline Mode 所需的短期群上下文。"""
+        msg = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if msg is None or chat is None or user is None:
+            return
+        if chat.type not in {"group", "supergroup"}:
+            await msg.reply_text("请在 Telegram 群聊中使用此命令")
+            return
+
+        q_group_id = await sql.get_q_group(chat.id)
+        if q_group_id is None:
+            await msg.reply_text("当前群聊尚未绑定 OneBot 群")
+            return
+
+        self._purge_inline_at_contexts()
+        if len(self._inline_at_contexts) >= INLINE_AT_CONTEXT_LIMIT:
+            self._inline_at_contexts.pop(next(iter(self._inline_at_contexts)))
+        token = token_urlsafe(18)
+        self._inline_at_contexts[token] = InlineAtContext(
+            user_id=user.id,
+            tg_chat_id=chat.id,
+            q_group_id=q_group_id,
+            expires_at=time.monotonic() + INLINE_AT_TTL,
+        )
+        await msg.reply_text(
+            "请选择需要 @ 的 OneBot 群成员",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("选择群成员", switch_inline_query_current_chat=f"at {token} ")]]
+            ),
+        )
+
+    async def inline_at(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """按 /at 创建的上下文搜索 OneBot 群成员并返回 Inline 结果。"""
+        inline_query = update.inline_query
+        if inline_query is None:
+            return
+        query_parts = inline_query.query.strip().split(maxsplit=2)
+        if len(query_parts) < 2 or query_parts[0].lower() != "at":
+            return
+
+        token = query_parts[1]
+        search = query_parts[2].strip().casefold() if len(query_parts) == 3 else ""
+        self._purge_inline_at_contexts()
+        inline_context = self._inline_at_contexts.get(token)
+        if inline_context is None or inline_context.user_id != inline_query.from_user.id:
+            await inline_query.answer([], cache_time=0, is_personal=True)
+            return
+
+        members_snapshot = self._inline_at_member_snapshots.get(inline_context.q_group_id)
+        if members_snapshot is None:
+            if len(self._inline_at_member_snapshots) >= INLINE_AT_SNAPSHOT_LIMIT:
+                self._inline_at_member_snapshots.pop(
+                    next(iter(self._inline_at_member_snapshots))
+                )
+            members_snapshot = InlineAtMemberSnapshot(
+                members=await q_gateway.get_group_member_list(inline_context.q_group_id),
+                expires_at=time.monotonic() + INLINE_AT_TTL,
+            )
+            self._inline_at_member_snapshots[inline_context.q_group_id] = members_snapshot
+        id_show = bool(await sql.get_id_show_enabled(inline_context.tg_chat_id))
+        members = [
+            member
+            for member in members_snapshot.members
+            if (
+                not search
+                or any(
+                    isinstance(value, str) and search in value.casefold()
+                    for value in (member.get("card"), member.get("nickname"))
+                )
+                or search in str(member.get("user_id", ""))
+            )
+        ]
+        try:
+            offset = max(int(inline_query.offset or "0"), 0)
+        except ValueError:
+            offset = 0
+        page = members[offset : offset + INLINE_AT_PAGE_SIZE]
+        results = []
+        for member in page:
+            name = self._inline_member_name(member)
+            user_id = member.get("user_id")
+            if not isinstance(user_id, int) or isinstance(user_id, bool):
+                continue
+            selection_token = self._inline_at_selection_token(
+                token,
+                inline_context,
+                user_id,
+            )
+            title = f"{name}[{user_id}]" if id_show else name
+            message_text = f"@{INLINE_AT_MARKER}{title}"
+            results.append(
+                InlineQueryResultArticle(
+                    id=str(user_id),
+                    title=title,
+                    input_message_content=InputTextMessageContent(
+                        message_text,
+                        entities=(
+                            MessageEntity(
+                                type=MessageEntity.TEXT_LINK,
+                                offset=1,
+                                length=1,
+                                url=f"{INLINE_AT_URL_PREFIX}{selection_token}",
+                            ),
+                        ),
+                        link_preview_options=LinkPreviewOptions(is_disabled=True),
+                    ),
+                )
+            )
+        next_offset = (
+            str(offset + INLINE_AT_PAGE_SIZE)
+            if offset + INLINE_AT_PAGE_SIZE < len(members)
+            else ""
+        )
+        await inline_query.answer(
+            results,
+            cache_time=0,
+            is_personal=True,
+            next_offset=next_offset,
+        )
+
+    @staticmethod
+    def _inline_member_name(member: dict[str, Any]) -> str:
+        """按群名片、昵称顺序取得 Inline 候选名称。"""
+        return onebot_user_name(member) or ONEBOT_USER_NAME
+
+    async def _inline_at_user_id(self, msg: Message, bot_id: int) -> int | None:
+        """校验当前 Bot 的 Inline 选择 token 并取得 OneBot 用户 ID。"""
+        via_bot = getattr(msg, "via_bot", None)
+        text = msg.text
+        if (
+            via_bot is None
+            or via_bot.id != bot_id
+            or not text
+            or not text.startswith(f"@{INLINE_AT_MARKER}")
+        ):
+            return None
+        entities = msg.entities or ()
+        if len(entities) != 1:
+            return None
+        entity = entities[0]
+        if (
+            entity.type != MessageEntity.TEXT_LINK
+            or entity.offset != 1
+            or entity.length != 1
+            or not entity.url
+            or not entity.url.startswith(INLINE_AT_URL_PREFIX)
+        ):
+            return None
+        parsed_url = urlsplit(entity.url)
+        token = parsed_url.path.removeprefix("/token/")
+        if (
+            parsed_url.scheme != "https"
+            or parsed_url.netloc != "q2tg.invalid"
+            or parsed_url.path != f"/token/{token}"
+            or not token
+            or "/" in token
+            or parsed_url.query
+            or parsed_url.fragment
+        ):
+            return None
+
+        self._purge_inline_at_contexts()
+        selection = self._inline_at_selections.get(token)
+        sender = msg.from_user
+        if (
+            selection is None
+            or sender is None
+            or selection.user_id != sender.id
+            or selection.tg_chat_id != msg.chat_id
+            or selection.context_token not in self._inline_at_contexts
+            or await sql.get_q_group(msg.chat_id) != selection.q_group_id
+        ):
+            return None
+        return selection.q_user_id
+
+    def _inline_at_selection_token(
+        self,
+        context_token: str,
+        inline_context: InlineAtContext,
+        q_user_id: int,
+    ) -> str:
+        key = (context_token, q_user_id)
+        cached_token = self._inline_at_selection_tokens.get(key)
+        if cached_token is not None and cached_token in self._inline_at_selections:
+            return cached_token
+        if len(self._inline_at_selections) >= INLINE_AT_SELECTION_LIMIT:
+            oldest_token = next(iter(self._inline_at_selections))
+            oldest = self._inline_at_selections.pop(oldest_token)
+            self._inline_at_selection_tokens.pop(
+                (oldest.context_token, oldest.q_user_id),
+                None,
+            )
+        selection_token = token_urlsafe(24)
+        self._inline_at_selections[selection_token] = InlineAtSelection(
+            context_token=context_token,
+            user_id=inline_context.user_id,
+            tg_chat_id=inline_context.tg_chat_id,
+            q_group_id=inline_context.q_group_id,
+            q_user_id=q_user_id,
+            expires_at=inline_context.expires_at,
+        )
+        self._inline_at_selection_tokens[key] = selection_token
+        return selection_token
+
+    def _purge_inline_at_contexts(self) -> None:
+        now = time.monotonic()
+        for token, inline_context in list(self._inline_at_contexts.items()):
+            if inline_context.expires_at <= now:
+                self._inline_at_contexts.pop(token, None)
+        for group_id, snapshot in list(self._inline_at_member_snapshots.items()):
+            if snapshot.expires_at <= now:
+                self._inline_at_member_snapshots.pop(group_id, None)
+        for token, selection in list(self._inline_at_selections.items()):
+            if (
+                selection.expires_at <= now
+                or selection.context_token not in self._inline_at_contexts
+            ):
+                self._inline_at_selections.pop(token, None)
+                self._inline_at_selection_tokens.pop(
+                    (selection.context_token, selection.q_user_id),
+                    None,
+                )
+
+    @staticmethod
+    def _inline_at_entity_log(entity: MessageEntity) -> dict[str, Any]:
+        url = entity.url
+        url_info: str | None = None
+        if url:
+            parsed = urlsplit(url)
+            fingerprint = hashlib.sha256(url.encode()).hexdigest()[:12]
+            url_info = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rsplit('/', 1)[0]}/<sha256:{fingerprint}>"
+        return {
+            "type": str(entity.type),
+            "offset": entity.offset,
+            "length": entity.length,
+            "url": url_info,
+        }
 
     @staticmethod
     async def _can_forward_sender(msg: Message, bot_id: int | None) -> bool:
@@ -374,14 +673,15 @@ class TGhandlers:
             await msg.reply_text("非群聊管理员只能撤回自己的消息")
             return
 
-        failures = 0
-        for message_id in mapping.q_message_ids:
-            try:
-                # 目标消息由群主发送、机器人仅为管理员时，Onebot 可能返回成功，
-                # 但群聊权限仍会阻止实际撤回。
-                await q_gateway.delete_message(message_id)
-            except RuntimeError:
-                failures += 1
+        # 目标消息由群主发送、机器人仅为管理员时，OneBot 可能返回成功，
+        # 但群聊权限仍会阻止实际撤回。
+        failures, connected = await self._run_onebot_message_actions(
+            mapping.q_message_ids,
+            q_gateway.delete_message,
+        )
+        if not connected:
+            await msg.reply_text("OneBot 连接已断开，请稍后重试")
+            return
         if failures:
             await msg.reply_text("OneBot 撤回失败，消息可能超过两分钟或机器人权限不足")
             return
@@ -415,12 +715,13 @@ class TGhandlers:
             await msg.reply_text("未找到该消息的跨平台映射")
             return
 
-        failures = 0
-        for message_id in mapping.q_message_ids:
-            try:
-                await q_gateway.delete_essence_message(message_id)
-            except RuntimeError:
-                failures += 1
+        failures, connected = await self._run_onebot_message_actions(
+            mapping.q_message_ids,
+            q_gateway.delete_essence_message,
+        )
+        if not connected:
+            await msg.reply_text("OneBot 连接已断开，请稍后重试")
+            return
         if failures:
             await msg.reply_text("OneBot 取消精华失败，机器人权限可能不足")
             return
@@ -430,6 +731,21 @@ class TGhandlers:
                 message_id=message_id,
             )
         await msg.delete()
+
+    @staticmethod
+    async def _run_onebot_message_actions(
+        message_ids: tuple[int, ...],
+        action: Callable[[int], Awaitable[None]],
+    ) -> tuple[int, bool]:
+        failures = 0
+        for message_id in message_ids:
+            try:
+                await action(message_id)
+            except OneBotConnectionError:
+                return failures, False
+            except RuntimeError:
+                failures += 1
+        return failures, True
 
     async def get_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """显示进程内存、队列长度和媒体转换平均耗时。"""
@@ -484,13 +800,33 @@ class TGhandlers:
             return
         user_id = msg.from_user.id if msg.from_user is not None else 0
         sender_name = msg.from_user.full_name if msg.from_user is not None else f"Telegram用户 {user_id}"
+        at_user_id = await self._inline_at_user_id(msg, context.bot.id)
+        via_bot = getattr(msg, "via_bot", None)
+        if (
+            at_user_id is None
+            and via_bot is not None
+            and via_bot.id == context.bot.id
+            and msg.text
+            and msg.text.startswith("@")
+        ):
+            baselog.error(
+                "当前 Bot 的 Inline @ 结果无法恢复 OneBot 用户 ID，已阻止文本降级: "
+                "chat=%s message=%s user=%s via_bot=%s entities=%r",
+                msg.chat_id,
+                msg.message_id,
+                user_id,
+                via_bot.id,
+                [self._inline_at_entity_log(entity) for entity in (msg.entities or ())],
+            )
+            return
         message = TelegramMessage(
             # 纯文本只有一个 Telegram message_id，仍使用元组统一映射结构。
             message_ids=(msg.message_id,),
             group_id=msg.chat_id,
             user_id=user_id,
             sender_name=sender_name,
-            text=msg.text,
+            text=None if at_user_id is not None else msg.text,
+            at_user_id=at_user_id,
             bot_forward_required=(
                 bot_forward_required
                 or bool(
@@ -603,7 +939,7 @@ class TGhandlers:
 
          Telegram 的 Message.photo 是同一张照片的多个尺寸，不是多张照片；这里
         选择最后一个最大尺寸。video、voice、audio 和 document 分别映射为
-        Onebot 的 video、record、file 和 file。函数成功入队后，MediaFile 所有权
+        OneBot 的 video、record、file 和 file。函数成功入队后，MediaFile 所有权
         交给转发任务；此前的异常或取消路径由本函数清理。
         """
         # Update 到达次序不一定稳定，按 message_id 恢复用户发送的相册顺序。
@@ -748,57 +1084,50 @@ class TGhandlers:
                 # 图片大小不会再改变，可以立即归还下载前的保守预留。
                 await media_queue_budget.release(reserved_bytes - total_size)
                 reserved_bytes = total_size
-            try:
-                message = TelegramMessage(
-                    message_ids=tuple(message.message_id for message in messages),
-                    group_id=first.chat_id,
-                    user_id=user_id,
-                    sender_name=sender_name,
-                    text=next((message.caption for message in messages if message.caption), None),
-                    bot_forward_required=bool(
-                        first.from_user is not None
-                        and getattr(first.from_user, "is_bot", False)
-                    ),
-                    forwarded_from=next(
-                        (
-                            name
-                            for message in messages
-                            if (
-                                name := forward_origin_name(
-                                    getattr(message, "forward_origin", None)
-                                )
+            message = TelegramMessage(
+                message_ids=tuple(message.message_id for message in messages),
+                group_id=first.chat_id,
+                user_id=user_id,
+                sender_name=sender_name,
+                text=next((message.caption for message in messages if message.caption), None),
+                bot_forward_required=bool(
+                    first.from_user is not None
+                    and getattr(first.from_user, "is_bot", False)
+                ),
+                forwarded_from=next(
+                    (
+                        name
+                        for message in messages
+                        if (
+                            name := forward_origin_name(
+                                getattr(message, "forward_origin", None)
                             )
-                            is not None
-                        ),
-                        None,
+                        )
+                        is not None
                     ),
-                    reply_message_id=next(
-                        (
-                            message.reply_to_message.message_id
-                            for message in messages
-                            if message.reply_to_message is not None
-                        ),
-                        None,
+                    None,
+                ),
+                reply_message_id=next(
+                    (
+                        message.reply_to_message.message_id
+                        for message in messages
+                        if message.reply_to_message is not None
                     ),
-                    # 媒体组 caption 通常只附在其中一项，取第一条非空文本。
-                    media=tuple(media),
-                    # 视频转码可能改变大小，预处理完成前保留最坏情况预算。
-                    queue_bytes=reserved_bytes,
+                    None,
+                ),
+                # 媒体组 caption 通常只附在其中一项，取第一条非空文本。
+                media=tuple(media),
+                # 视频转码可能改变大小，预处理完成前保留最坏情况预算。
+                queue_bytes=reserved_bytes,
+            )
+            if needs_processing:
+                task = telegram_processing_task(message, q_gateway, first.get_bot())
+                if not media_processor.submit(task):
+                    raise ValueError("Telegram 媒体处理队列已满，请稍后重试")
+            else:
+                await message_bus.put(
+                    telegram_forward_task(message, q_gateway, first.get_bot())
                 )
-                if needs_processing:
-                    task = telegram_processing_task(message, q_gateway, first.get_bot())
-                    if not media_processor.submit(task):
-                        await task.cleanup()
-                        reserved_bytes = 0
-                        raise ValueError("Telegram 媒体处理队列已满，请稍后重试")
-                else:
-                    await message_bus.put(
-                        telegram_forward_task(message, q_gateway, first.get_bot())
-                    )
-            except BaseException:
-                await media_queue_budget.release(total_size)
-                reserved_bytes = 0
-                raise
         except BaseException:
             # BaseException 包含任务取消；关停时取消相册任务也必须关闭临时文件，
             # 并归还已经取得但尚未使用的两类预算。
@@ -830,9 +1159,11 @@ class TGhandlers:
             CommandHandler("forward", self.forward),
             CommandHandler("bot_forward", self.bot_forward),
             CommandHandler("id_show", self.id_show),
+            CommandHandler("at", self.at),
             CommandHandler("undo", self.undo),
             CommandHandler("unpin", self.unpin),
             CommandHandler("status", self.get_status),
+            InlineQueryHandler(self.inline_at, pattern=r"^at(?:\s|$)"),
             MessageHandler(
                 filters.ChatType.GROUPS & filters.TEXT & filters.COMMAND,
                 self.receive_command,

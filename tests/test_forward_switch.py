@@ -103,15 +103,15 @@ class ForwardSwitchTests(unittest.IsolatedAsyncioTestCase):
     async def test_group_admin_can_disable_and_enable_forwarding(self) -> None:
         message, gateway = await self._forward(args=["off"], status=ChatMember.ADMINISTRATOR)
         self.assertFalse(await self.sql.get_tg_forward_enabled(-456))
-        message.reply_text.assert_awaited_once_with("Telegram → Onebot 转发已关闭")
+        message.reply_text.assert_awaited_once_with("Telegram → OneBot 转发已关闭")
         gateway.send_group_message.assert_awaited_once_with(
             group_id=123,
-            message=[{"type": "text", "data": {"text": "Telegram → Onebot 转发已关闭"}}],
+            message=[{"type": "text", "data": {"text": "Telegram → OneBot 转发已关闭"}}],
         )
 
         message, gateway = await self._forward(args=["on"], status=ChatMember.OWNER)
         self.assertTrue(await self.sql.get_tg_forward_enabled(-456))
-        message.reply_text.assert_awaited_once_with("Telegram → Onebot 转发已开启")
+        message.reply_text.assert_awaited_once_with("Telegram → OneBot 转发已开启")
         gateway.send_group_message.assert_awaited_once()
 
     async def test_regular_member_cannot_change_forwarding(self) -> None:
@@ -125,10 +125,10 @@ class ForwardSwitchTests(unittest.IsolatedAsyncioTestCase):
 
         message = await self._id_show(args=["off"], status=ChatMember.ADMINISTRATOR)
         self.assertFalse(await self.sql.get_id_show_enabled(-456))
-        message.reply_text.assert_awaited_once_with("Onebot 用户及 @ 对象 ID 显示已关闭")
+        message.reply_text.assert_awaited_once_with("OneBot 用户及 @ 对象 ID 显示已关闭")
 
         message = await self._id_show(args=[], status=ChatMember.OWNER)
-        message.reply_text.assert_awaited_once_with("Onebot 用户及 @ 对象 ID 显示已关闭")
+        message.reply_text.assert_awaited_once_with("OneBot 用户及 @ 对象 ID 显示已关闭")
 
     async def test_regular_member_cannot_change_id_show(self) -> None:
         message = await self._id_show(args=["off"], status=ChatMember.MEMBER)

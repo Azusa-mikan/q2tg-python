@@ -103,8 +103,8 @@ async def snowluma_ws(websocket: WebSocket) -> None:
             baselog.warning("Snowluma 已断开连接")
         finally:
             q_gateway.unbind(websocket)
-            # Onebot worker 与当前连接绑定。取消时，正在执行的通用任务会进入
-            # retry_queue；尚未开始的任务继续留在 Onebot 队列等待下一次连接。
+            # OneBot worker 与当前连接绑定。取消时，正在执行的通用任务会进入
+            # retry_queue；尚未开始的任务继续留在 OneBot 队列等待下一次连接。
             onebot_consumers = [
                 task
                 for (target, _), task in consumers.items()

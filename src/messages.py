@@ -2,14 +2,42 @@ from __future__ import annotations
 
 """平台无关的内部消息与转发任务模型。"""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from src.media import MediaFile
 
 ONEBOT_USER_NAME = "OneBot 用户"
+
+
+def is_http_url(value: str) -> bool:
+    """校验带主机名的 HTTP(S) URL。"""
+    parsed = urlsplit(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def onebot_user_id(value: Any) -> int | None:
+    """解析 OneBot 用户 ID，拒绝布尔值和非数字文本。"""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def onebot_user_name(data: Mapping[str, Any]) -> str | None:
+    """按群名片、昵称顺序取得非空 OneBot 用户名称。"""
+    for key in ("card", "nickname"):
+        value = data.get(key)
+        if isinstance(value, str) and (value := value.strip()):
+            return value
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +145,7 @@ class TelegramMessage:
     user_id: int
     sender_name: str
     text: str | None
+    at_user_id: int | None = None
     bot_forward_required: bool = False
     forwarded_from: str | None = None
     reply_message_id: int | None = None

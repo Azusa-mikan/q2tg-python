@@ -20,7 +20,7 @@ QueueItem = SendTask | Shutdown
 
 
 class MessageBus:
-    """管理 Onebot、Telegram 发送队列以及独立的重试队列。
+    """管理 OneBot、Telegram 发送队列以及独立的重试队列。
 
     目标队列只关心任务发往哪里，不关心消息来源或业务 DTO。失败分类、最大次数、
     耗尽处理和资源释放全部由 SendTask 携带，因此后续语音、文件等类型无需修改总线。
@@ -123,7 +123,7 @@ class MessageBus:
                         baselog.exception("发送任务失败，不重试: %s", item.label)
                         await self._run_failed(item, error, exhausted=False)
                 except asyncio.CancelledError:
-                    # 连接关闭可能取消正在等待 RPC 的 Onebot 任务；保留任务给下次连接。
+                    # 连接关闭可能取消正在等待 RPC 的 OneBot 任务；保留任务给下次连接。
                     requeued = True
                     self.retry_queue.put_nowait(item)
                     raise

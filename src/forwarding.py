@@ -10,7 +10,7 @@ from functools import partial
 from pathlib import Path
 from secrets import token_hex
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 import filetype
 import httpx
@@ -52,6 +52,9 @@ from src.messages import (
     SendTask,
     TelegramGroupMemberEvent,
     TelegramMessage,
+    is_http_url,
+    onebot_user_id,
+    onebot_user_name,
 )
 from src.notice import (
     enqueue_bridge_notice,
@@ -123,7 +126,7 @@ async def onebot_message_text(
         if segment.get("type") != "at":
             continue
         data = segment.get("data")
-        user_id = _onebot_at_user_id(data.get("qq")) if isinstance(data, dict) else None
+        user_id = onebot_user_id(data.get("qq")) if isinstance(data, dict) else None
         if (
             user_id is not None
             and user_id not in member_names
@@ -156,29 +159,17 @@ async def onebot_message_text(
         if qq == "all":
             parts.append("@全体成员")
             continue
-        user_id = _onebot_at_user_id(qq)
+        user_id = onebot_user_id(qq)
         if user_id is None:
             continue
         name = member_names.get(user_id)
         if name is not None:
             mention = f"{name}[{user_id}]" if id_show_enabled else name
         else:
-            mention = str(user_id) if id_show_enabled else "Onebot用户"
+            mention = str(user_id) if id_show_enabled else ONEBOT_USER_NAME
         mention = f"@{mention}"
         parts.append(escape_markdown(mention, version=2) if markdown_v2 else mention)
     return "".join(parts)
-
-
-def _onebot_at_user_id(value: Any) -> int | None:
-    """解析 at.qq 的数字账号；all 和畸形值由调用方分别处理或忽略。"""
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None
 
 
 async def _onebot_member_name(
@@ -207,13 +198,7 @@ async def _onebot_member_name(
             user_id,
         )
         return None
-    card = member.get("card")
-    nickname = member.get("nickname")
-    if isinstance(card, str) and card.strip():
-        return card.strip()
-    if isinstance(nickname, str) and nickname.strip():
-        return nickname.strip()
-    return None
+    return onebot_user_name(member)
 
 
 def onebot_message_media(
@@ -231,7 +216,7 @@ def onebot_message_media(
             unavailable.append(kind)
             continue
         url = data.get("url")
-        if not isinstance(url, str) or not _is_http_url(url):
+        if not isinstance(url, str) or not is_http_url(url):
             unavailable.append(kind)
             continue
         filename = _onebot_media_filename(data.get("file"), kind)
@@ -282,11 +267,6 @@ def onebot_group_announcement(
     return None
 
 
-def _is_http_url(value: str) -> bool:
-    parsed = urlsplit(value.strip())
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
-
-
 def _onebot_media_filename(file: Any, kind: str) -> str:
     """把入站 data.file 作为文件名，并移除不适合上传文件名的字符。"""
     if isinstance(file, str):
@@ -330,10 +310,10 @@ async def download_media(
                     content_length is not None
                     and int(content_length) > ONEBOT_MEDIA_LIMIT
                 ):
-                    raise MediaTooLargeError("Onebot 媒体超过 20 MB，无法转发")
+                    raise MediaTooLargeError("OneBot 媒体超过 20 MB，无法转发")
                 async for chunk in response.aiter_bytes(DOWNLOAD_CHUNK_SIZE):
                     if media.size + len(chunk) > ONEBOT_MEDIA_LIMIT:
-                        raise MediaTooLargeError("Onebot 媒体超过 20 MB，无法转发")
+                        raise MediaTooLargeError("OneBot 媒体超过 20 MB，无法转发")
                     media.write(chunk)
         except httpx.HTTPError:
             raise RuntimeError("OneBot 媒体下载失败") from None
@@ -453,12 +433,14 @@ async def forward_onebot_to_telegram(
         if msg.announcement_filename is None:
             msg.announcement_filename = f"群公告 - {token_hex(8)}.md"
         if not msg.tg_message_ids:
+            # 公告文件可能被下载和长期保存，正文作者永久隐藏数字 ID；Telegram
+            # caption 仍沿用上方按当前群 id_show 设置生成的 sender_name。
             author = ONEBOT_USER_NAME if msg.sender_name_is_fallback else msg.sender_name
             content = f"{author}:\n\n# 群公告\n\n{body}\n".encode()
             sent = await bot.send_document(
                 chat_id=group_id,
                 document=InputFile(content, filename=msg.announcement_filename),
-                caption=f"{author}:",
+                caption=f"{sender_name}:",
                 reply_parameters=reply_parameters,
             )
             msg.tg_message_ids.append(sent.message_id)
@@ -787,7 +769,7 @@ def format_duration(seconds: int) -> str:
 
 def _event_member_text(name: str | None, user_id: int, *, show_id: bool) -> str:
     if name is None:
-        return str(user_id) if show_id else "OneBot用户"
+        return str(user_id) if show_id else ONEBOT_USER_NAME
     return f"{name}[{user_id}]" if show_id else name
 
 
@@ -1095,7 +1077,7 @@ def _utf16_length(text: str) -> int:
 
 
 async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) -> None:
-    """将 Telegram 文本或图片通过 OneBot action 发送到绑定的 Onebot 群。"""
+    """将 Telegram 文本或图片通过 OneBot action 发送到绑定的 OneBot 群。"""
     group_id = await sql.get_q_group(msg.group_id)
     if group_id is None:
         baselog.warning("Telegram 群未配置转发目标: %s", msg.group_id)
@@ -1104,7 +1086,7 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
         return
     if msg.bot_forward_required and not await sql.get_bot_forward_enabled(msg.group_id):
         return
-    if not msg.text and not msg.media:
+    if not msg.text and not msg.media and msg.at_user_id is None:
         baselog.warning("Telegram 消息没有可转发的内容: %s", msg.message_ids)
         return
 
@@ -1112,7 +1094,9 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
     text = f"{msg.sender_name}:"
     if msg.forwarded_from is not None:
         text += f"\n转发自: {msg.forwarded_from}"
-    if msg.text:
+    if msg.at_user_id is not None:
+        text += "\n"
+    elif msg.text:
         text += f"\n{msg.text}"
     if msg.media:
         if msg.media_ids is None:
@@ -1138,11 +1122,14 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
         else:
             batches = [[text_segment, *media_segments]]
     else:
-        batches = [
-            [
-                {"type": "text", "data": {"text": text}},
-            ]
+        segments: list[dict[str, Any]] = [
+            {"type": "text", "data": {"text": text}},
         ]
+        if msg.at_user_id is not None:
+            segments.append(
+                {"type": "at", "data": {"qq": str(msg.at_user_id)}}
+            )
+        batches = [segments]
 
     if msg.reply_message_id is not None:
         reply_mapping = await sql.get_q_message(msg.group_id, msg.reply_message_id)
@@ -1174,7 +1161,7 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
             tg_user_id=msg.user_id,
         )
     except Exception:  # noqa: BLE001
-        baselog.exception("Onebot 消息发送成功，但消息映射保存失败")
+        baselog.exception("OneBot 消息发送成功，但消息映射保存失败")
 
 
 async def forward_telegram_pin_to_onebot(
@@ -1275,7 +1262,7 @@ def _is_mp4(content: MediaFile) -> bool:
 
 
 def _is_gif(content: MediaFile) -> bool:
-    """通过文件签名识别 Onebot image 段中的动态 GIF。"""
+    """通过文件签名识别 OneBot image 段中的动态 GIF。"""
     return _media_mime(content) == "image/gif"
 
 
@@ -1317,7 +1304,7 @@ async def _disable_forwarding(
         await sql.set_tg_forward_enabled(msg.group_id, False)
         q_group_id = await sql.get_q_group(msg.group_id)
         text = (
-            "转发到 Onebot 连续失败 3 次，已自动关闭转发。"
+            "转发到 OneBot 连续失败 3 次，已自动关闭转发。"
             "请排查后使用 /forward on 重新开启。"
         )
         enqueue_bridge_notice(
@@ -1332,7 +1319,7 @@ async def _disable_forwarding(
         partial(
             bot.send_message,
             chat_id=msg.group_id,
-            text="消息发送到 Onebot 失败，请稍后重试。",
+            text="消息发送到 OneBot 失败，请稍后重试。",
         )
     )
 
@@ -1342,7 +1329,7 @@ async def _notify_onebot_telegram_failure(
     gateway: QGateway,
     error: Exception,
 ) -> None:
-    """Telegram 任务耗尽后只向来源 Onebot 群发送失败提示。"""
+    """Telegram 任务耗尽后只向来源 OneBot 群发送失败提示。"""
     text = (
         str(error)
         if isinstance(error, MediaTooLargeError)
@@ -1365,7 +1352,7 @@ def telegram_forward_task(
     gateway: QGateway,
     bot: Bot,
 ) -> SendTask:
-    """创建目标为 Onebot、携带 OneBot 重试策略的通用发送任务。"""
+    """创建目标为 OneBot、携带 OneBot 重试策略的通用发送任务。"""
     return SendTask(
         target=SendTarget.ONEBOT,
         send=partial(forward_telegram_to_onebot, msg, gateway),
@@ -1382,7 +1369,7 @@ async def prepare_telegram_forward(
     gateway: QGateway,
     bot: Bot,
 ) -> None:
-    """串行规范化视频，完成后把发送任务交给 Onebot 队列。"""
+    """串行规范化视频，完成后把发送任务交给 OneBot 队列。"""
     from src.bus import message_bus
 
     for attachment in msg.media:
@@ -1457,7 +1444,7 @@ def onebot_forward_task(
     client: httpx.AsyncClient,
     gateway: QGateway,
 ) -> SendTask:
-    """创建目标为 Telegram、失败三次后仅通知 Onebot 的通用任务。"""
+    """创建目标为 Telegram、失败三次后仅通知 OneBot 的通用任务。"""
     return SendTask(
         target=SendTarget.TELEGRAM,
         send=partial(forward_onebot_to_telegram, msg, bot, client, gateway),

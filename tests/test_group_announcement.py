@@ -188,6 +188,45 @@ class GroupAnnouncementTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(bot.send_document.await_args.kwargs["caption"], "OneBot 用户:")
 
+    async def test_id_show_only_affects_announcement_caption(self) -> None:
+        segment = announcement_segment()
+        payload = json.loads(segment["data"]["data"])
+        del payload["meta"]["mannounce"]["pic"]
+        segment["data"]["data"] = json.dumps(payload, ensure_ascii=False)
+        bot = SimpleNamespace(
+            send_document=AsyncMock(return_value=SimpleNamespace(message_id=211))
+        )
+        message = OneBotMessage(
+            message_id=112,
+            group_id=123,
+            user_id=456,
+            sender_name="Example Card",
+            message=[segment],
+        )
+        database = SimpleNamespace(
+            get_tg_message=AsyncMock(return_value=None),
+            get_tg_group=AsyncMock(return_value=-100_123),
+            get_id_show_enabled=AsyncMock(return_value=True),
+            set_message_mapping=AsyncMock(),
+        )
+
+        with patch("src.forwarding.sql", database):
+            await forward_onebot_to_telegram(
+                message,
+                cast(ExtBot[None], bot),
+                cast(httpx.AsyncClient, SimpleNamespace()),
+            )
+
+        document = bot.send_document.await_args.kwargs["document"]
+        self.assertEqual(
+            document.input_file_content,
+            "Example Card:\n\n# 群公告\n\n测试\n测试1\n".encode(),
+        )
+        self.assertEqual(
+            bot.send_document.await_args.kwargs["caption"],
+            "Example Card[456]:",
+        )
+
     async def test_image_retry_replies_to_existing_announcement_document(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, content=b"image", request=request)

@@ -9,7 +9,12 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from src.log import baselog
-from src.media import STREAM_CHUNK_SIZE, MediaFile
+from src.media import (
+    MediaFile,
+    communicate_media_process,
+    replace_media_content,
+    start_media_process,
+)
 from src.messages import MediaTooLargeError
 from src.paths import ensure_temp_dir
 
@@ -76,7 +81,7 @@ async def normalize_onebot_record(media: MediaFile) -> None:
             raise MediaTooLargeError("OneBot 语音转码后超过 20 MB，无法转发")
         if output_size == 0 or not _is_ogg_file(output_path):
             raise ValueError("OneBot 语音转码未生成有效的 Ogg 文件")
-        _replace_media_content(media, output_path)
+        replace_media_content(media, output_path)
         media.filename = f"{Path(media.filename).stem or 'voice'}.ogg"
         media.media_type = "audio/ogg"
         baselog.info("OneBot 语音规范化完成，耗时 %.2f 秒", time.monotonic() - started_at)
@@ -88,7 +93,7 @@ async def normalize_onebot_record(media: MediaFile) -> None:
 async def _decode_silk(media: MediaFile, pcm_path: Path) -> None:
     input_fd = media.file.fileno()
     media.rewind()
-    process = await _start_process(
+    process = await start_media_process(
         sys.executable,
         "-c",
         _PILK_WORKER,
@@ -96,8 +101,13 @@ async def _decode_silk(media: MediaFile, pcm_path: Path) -> None:
         str(pcm_path),
         str(RECORD_SIZE_LIMIT),
         pass_fds=(input_fd,),
+        missing_error="语音转发需要安装 ffmpeg 和 ffprobe",
     )
-    _, stderr = await _communicate(process, timeout=TRANSCODE_TIMEOUT)
+    _, stderr = await communicate_media_process(
+        process,
+        timeout=TRANSCODE_TIMEOUT,
+        timeout_error="OneBot 语音处理超时",
+    )
     pcm_size = pcm_path.stat().st_size
     if process.returncode == -signal.SIGXFSZ or (
         process.returncode != 0 and pcm_size >= RECORD_SIZE_LIMIT
@@ -110,7 +120,7 @@ async def _decode_silk(media: MediaFile, pcm_path: Path) -> None:
 async def _probe_audio(media: MediaFile) -> tuple[str, str]:
     input_fd = media.file.fileno()
     media.rewind()
-    process = await _start_process(
+    process = await start_media_process(
         "ffprobe",
         "-v",
         "error",
@@ -121,8 +131,13 @@ async def _probe_audio(media: MediaFile) -> tuple[str, str]:
         f"/proc/self/fd/{input_fd}",
         pass_fds=(input_fd,),
         stdout=asyncio.subprocess.PIPE,
+        missing_error="语音转发需要安装 ffmpeg 和 ffprobe",
     )
-    stdout, stderr = await _communicate(process, timeout=PROBE_TIMEOUT)
+    stdout, stderr = await communicate_media_process(
+        process,
+        timeout=PROBE_TIMEOUT,
+        timeout_error="OneBot 语音处理超时",
+    )
     if process.returncode != 0:
         raise ValueError(f"无法识别 OneBot 语音格式: {_safe_error(stderr)}")
     try:
@@ -174,15 +189,20 @@ async def _transcode_to_ogg(
         "ogg",
         str(output_path),
     )
-    process = await _start_process(
+    process = await start_media_process(
         sys.executable,
         "-c",
         _EXEC_WITH_FILE_LIMIT,
         str(RECORD_SIZE_LIMIT),
         *ffmpeg_args,
         pass_fds=pass_fds,
+        missing_error="语音转发需要安装 ffmpeg 和 ffprobe",
     )
-    _, stderr = await _communicate(process, timeout=TRANSCODE_TIMEOUT)
+    _, stderr = await communicate_media_process(
+        process,
+        timeout=TRANSCODE_TIMEOUT,
+        timeout_error="OneBot 语音处理超时",
+    )
     output_size = output_path.stat().st_size
     if process.returncode == -signal.SIGXFSZ or (
         process.returncode != 0 and output_size >= RECORD_SIZE_LIMIT
@@ -190,37 +210,6 @@ async def _transcode_to_ogg(
         raise MediaTooLargeError("OneBot 语音转码后超过 20 MB，无法转发")
     if process.returncode != 0:
         raise ValueError(f"OneBot 语音转码失败: {_safe_error(stderr)}")
-
-
-async def _start_process(*args: str, **kwargs) -> asyncio.subprocess.Process:
-    try:
-        return await asyncio.create_subprocess_exec(
-            *args,
-            stderr=asyncio.subprocess.PIPE,
-            **kwargs,
-        )
-    except FileNotFoundError:
-        raise ValueError("语音转发需要安装 ffmpeg 和 ffprobe") from None
-
-
-async def _communicate(
-    process: asyncio.subprocess.Process,
-    *,
-    timeout: int,
-) -> tuple[bytes, bytes]:
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-    except TimeoutError:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-        raise ValueError("OneBot 语音处理超时") from None
-    except BaseException:
-        if process.returncode is None:
-            process.kill()
-            await process.wait()
-        raise
-    return stdout or b"", stderr or b""
 
 
 def _is_silk(media: MediaFile) -> bool:
@@ -231,16 +220,6 @@ def _is_silk(media: MediaFile) -> bool:
         return any(header.startswith(candidate) for candidate in SILK_HEADERS)
     finally:
         media.file.seek(position)
-
-
-def _replace_media_content(media: MediaFile, output_path: Path) -> None:
-    media.file.seek(0)
-    media.file.truncate()
-    media.size = 0
-    with output_path.open("rb") as converted:
-        while chunk := converted.read(STREAM_CHUNK_SIZE):
-            media.write(chunk)
-    media.rewind()
 
 
 def _is_ogg_file(path: Path) -> bool:

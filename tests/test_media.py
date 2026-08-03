@@ -2,12 +2,19 @@ import asyncio
 import unittest
 from pathlib import Path
 from tempfile import SpooledTemporaryFile, TemporaryDirectory
+from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from telegram import InputFile
 
-from src.media import SPOOL_MEMORY_LIMIT, ByteBudget, MediaFile, media_item_budget
+from src.media import (
+    SPOOL_MEMORY_LIMIT,
+    ByteBudget,
+    MediaFile,
+    communicate_media_process,
+    media_item_budget,
+)
 
 
 class MediaFileTests(unittest.IsolatedAsyncioTestCase):
@@ -91,6 +98,29 @@ class MediaFileTests(unittest.IsolatedAsyncioTestCase):
         await waiter
         self.assertEqual(budget.used, 1)
         await budget.release(1)
+
+    async def test_media_process_timeout_kills_and_reaps_process(self) -> None:
+        communication = asyncio.get_running_loop().create_future()
+        process = SimpleNamespace(
+            communicate=Mock(return_value=communication),
+            returncode=None,
+            kill=Mock(),
+            wait=AsyncMock(),
+        )
+
+        with (
+            patch("src.media.asyncio.wait_for", side_effect=TimeoutError),
+            self.assertRaisesRegex(ValueError, "媒体处理超时"),
+        ):
+            await communicate_media_process(
+                cast(asyncio.subprocess.Process, process),
+                timeout=1,
+                timeout_error="媒体处理超时",
+            )
+
+        process.kill.assert_called_once_with()
+        process.wait.assert_awaited_once_with()
+        communication.cancel()
 
 
 if __name__ == "__main__":

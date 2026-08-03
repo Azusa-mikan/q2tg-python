@@ -32,6 +32,7 @@ Q2TG-Python 是一个基于 OneBot 11 与 Telegram Bot API 的双向群消息桥
 - 独立配置两侧 HTTP 或 SOCKS5 代理
 - 消息发送失败重试和最终失败通知
 - 通过 Telegram `/status` 查看内存、队列和最近媒体转换耗时
+- 通过 Telegram Inline Mode 选择并 @ 已绑定 OneBot 群的成员
 
 各消息类型的支持程度、限制与待办事项见 [消息类型支持清单](TODO.md)。
 
@@ -299,6 +300,7 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 | `/forward [on\|off]` | Telegram 群管理员 | 查询或设置 Telegram 到 OneBot 的转发状态 |
 | `/bot_forward [on\|off]` | Telegram 群管理员 | 查询或设置其他 Bot 消息及用户发给其他 Bot 的命令是否转发到 OneBot |
 | `/id_show [on\|off]` | Telegram 群管理员 | 查询或设置 OneBot 用户及 @ 对象的数字 ID 显示 |
+| `/at` | 所有人 | 打开 Inline Mode，选择需要 @ 的 OneBot 群成员 |
 | `/undo` | 按实现权限检查 | 回复目标消息后撤回两侧对应消息 |
 | `/unpin` | Telegram 群管理员 | 回复目标消息后取消两侧对应消息的置顶和精华状态 |
 
@@ -313,6 +315,12 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 `/bot_forward` 按绑定群独立保存，默认关闭，并受 `/forward` 总开关控制。开启后会同步其他
 Bot 的文本和受支持媒体，以及 `/new@other_bot` 这类用户命令；Q2TG-Python 自身的管理命令
 不会转发。启用前应确认相关 Bot 不会互相无限回复。
+
+`/at` 会返回“选择群成员”按钮。点击后在当前群打开 Inline Mode，可按群名片、昵称或数字
+ID 搜索已绑定 OneBot 群的成员；选择成员后会发送真正的 OneBot @ 消息。Telegram 侧在 ID
+显示关闭时显示 `@群名片或昵称`，开启时显示 `@群名片或昵称[数字 ID]`。`@` 与名称之间的
+不可见分隔符使用仅含临时随机令牌的超链接传递选择结果，链接中不包含 OneBot 用户 ID。临时选择入口仅限命令发起者
+使用，并在 5 分钟后失效。使用前需要在 BotFather 中为 Bot 开启 Inline Mode。
 
 ## 数据与限制
 

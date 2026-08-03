@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 from telegram import ChatMember, Update
 from telegram.ext import ContextTypes
 
+from src.messages import OneBotConnectionError
 from src.sql import Sql
 from src.tgbot.handlers import TGhandlers
 
@@ -30,7 +31,7 @@ class UndoTests(unittest.IsolatedAsyncioTestCase):
         user_id: int,
         original_user_id: int,
         status: str,
-        delete_error: RuntimeError | None = None,
+        delete_error: Exception | None = None,
     ):
         await self.sql.set_message_mapping(
             q_group_id=123,
@@ -113,6 +114,18 @@ class UndoTests(unittest.IsolatedAsyncioTestCase):
         command.reply_text.assert_awaited_with(
             "OneBot 撤回失败，消息可能超过两分钟或机器人权限不足"
         )
+
+    async def test_onebot_disconnect_keeps_command_and_shows_error(self) -> None:
+        command, bot, gateway = await self._undo(
+            user_id=10,
+            original_user_id=10,
+            status=ChatMember.MEMBER,
+            delete_error=OneBotConnectionError("disconnected"),
+        )
+        gateway.delete_message.assert_awaited_once_with(99)
+        bot.delete_messages.assert_not_awaited()
+        command.delete.assert_not_awaited()
+        command.reply_text.assert_awaited_once_with("OneBot 连接已断开，请稍后重试")
 
 
 if __name__ == "__main__":

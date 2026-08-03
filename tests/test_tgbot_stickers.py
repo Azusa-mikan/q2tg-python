@@ -89,6 +89,60 @@ class TelegramStickerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(media_item_budget.used, initial_items)
         self.assertEqual(media_queue_budget.used, initial_bytes)
 
+    async def test_full_processing_queue_releases_media_budgets(self) -> None:
+        initial_items = media_item_budget.used
+        initial_bytes = media_queue_budget.used
+        sticker = SimpleNamespace(
+            is_animated=False,
+            is_video=False,
+            file_size=100,
+            file_name="sticker.webp",
+            mime_type="image/webp",
+            get_file=AsyncMock(
+                return_value=SimpleNamespace(
+                    file_size=100,
+                    file_path="https://example.test/sticker",
+                )
+            ),
+        )
+        message = cast(
+            Message,
+            SimpleNamespace(
+                message_id=11,
+                chat_id=-456,
+                from_user=SimpleNamespace(id=7, full_name="Telegram User"),
+                sticker=sticker,
+                video=None,
+                photo=(),
+                document=None,
+                caption=None,
+                reply_to_message=None,
+                get_bot=lambda: SimpleNamespace(),
+            ),
+        )
+        handler = TGhandlers()
+        handler.download_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, content=self._webp(), request=request)
+            )
+        )
+        try:
+            with (
+                patch(
+                    "src.tgbot.handlers.sql.get_tg_forward_enabled",
+                    new_callable=AsyncMock,
+                    return_value=True,
+                ),
+                patch("src.tgbot.handlers.media_processor.submit", return_value=False),
+                self.assertRaisesRegex(ValueError, "媒体处理队列已满"),
+            ):
+                await handler._enqueue_media([message])
+        finally:
+            await handler.download_client.aclose()
+
+        self.assertEqual(media_item_budget.used, initial_items)
+        self.assertEqual(media_queue_budget.used, initial_bytes)
+
     async def test_tgs_sticker_downloads_original_for_gif_conversion(self) -> None:
         sticker = SimpleNamespace(
             is_animated=True,

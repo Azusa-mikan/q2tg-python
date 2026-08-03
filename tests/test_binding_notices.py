@@ -123,7 +123,7 @@ class BindingNoticeTests(unittest.IsolatedAsyncioTestCase):
                 cast(ContextTypes.DEFAULT_TYPE, context),
             )
 
-        message.reply_text.assert_awaited_once_with("Onebot端未找到该群聊")
+        message.reply_text.assert_awaited_once_with("OneBot端未找到该群聊")
         gateway.get_group_info.assert_not_awaited()
         self.assertIsNone(await self.sql.get_q_group(-456))
 
@@ -153,7 +153,7 @@ class BindingNoticeTests(unittest.IsolatedAsyncioTestCase):
                 cast(ContextTypes.DEFAULT_TYPE, context),
             )
 
-        message.reply_text.assert_awaited_once_with("Onebot 错误，请检查日志")
+        message.reply_text.assert_awaited_once_with("OneBot 错误，请检查日志")
         log_exception.assert_called_once()
         self.assertIsNone(await self.sql.get_q_group(-456))
 
@@ -184,7 +184,7 @@ class BindingNoticeTests(unittest.IsolatedAsyncioTestCase):
                 cast(ContextTypes.DEFAULT_TYPE, context),
             )
 
-        message.reply_text.assert_awaited_once_with("Onebot 错误，请检查日志")
+        message.reply_text.assert_awaited_once_with("OneBot 错误，请检查日志")
         log_exception.assert_called_once()
         self.assertEqual(await self.sql.get_q_group(-456), 123_456_789)
 

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, call, patch
 from telegram import ChatMember, Update
 from telegram.ext import ContextTypes
 
+from src.messages import OneBotConnectionError
 from src.sql import Sql
 from src.tgbot.handlers import TGhandlers
 
@@ -35,7 +36,7 @@ class UnpinTests(unittest.IsolatedAsyncioTestCase):
         *,
         status: str,
         reply: bool = True,
-        action_error: RuntimeError | None = None,
+        action_error: Exception | None = None,
     ):
         command = SimpleNamespace(
             reply_to_message=SimpleNamespace(message_id=201) if reply else None,
@@ -115,6 +116,17 @@ class UnpinTests(unittest.IsolatedAsyncioTestCase):
         command.reply_text.assert_awaited_once_with(
             "OneBot 取消精华失败，机器人权限可能不足"
         )
+
+    async def test_onebot_disconnect_keeps_telegram_pins(self) -> None:
+        command, bot, gateway = await self._unpin(
+            status=ChatMember.OWNER,
+            action_error=OneBotConnectionError("disconnected"),
+        )
+
+        gateway.delete_essence_message.assert_awaited_once_with(-1_001)
+        bot.unpin_chat_message.assert_not_awaited()
+        command.delete.assert_not_awaited()
+        command.reply_text.assert_awaited_once_with("OneBot 连接已断开，请稍后重试")
 
 
 if __name__ == "__main__":

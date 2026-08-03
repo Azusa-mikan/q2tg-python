@@ -38,7 +38,7 @@ def onebot_notice_task(
     text: str,
     label: str = "onebot-notice",
 ) -> SendTask:
-    """创建单次发送的 Onebot 状态通知任务。"""
+    """创建单次发送的 OneBot 状态通知任务。"""
 
     async def send_notice() -> None:
         await gateway.send_group_message(
@@ -62,7 +62,7 @@ def enqueue_bridge_notice(
     text: str,
     bus: MessageBus | None = None,
 ) -> None:
-    """分别向 Telegram、Onebot 队列投递通知；任一队列满都不影响另一侧。"""
+    """分别向 Telegram、OneBot 队列投递通知；任一队列满都不影响另一侧。"""
     bus = bus or message_bus
     _enqueue_notice(
         bus,
@@ -87,7 +87,7 @@ def enqueue_onebot_notice(
     text: str,
     bus: MessageBus | None = None,
 ) -> None:
-    """向 Onebot 队列投递单侧通知。"""
+    """向 OneBot 队列投递单侧通知。"""
     bus = bus or message_bus
     _enqueue_notice(
         bus,

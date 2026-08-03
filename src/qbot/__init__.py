@@ -138,6 +138,30 @@ class QGateway:
             raise TypeError(f"OneBot 群成员响应缺少 data: {response!r}")
         return data
 
+    async def get_group_member_list(self, group_id: int) -> list[dict[str, Any]]:
+        """跳过缓存查询指定 OneBot 群的全部成员。"""
+        response = await self._call_action(
+            "get_group_member_list",
+            {"group_id": group_id, "no_cache": True},
+        )
+        data = response.get("data")
+        if not isinstance(data, list) or not all(
+            isinstance(member, dict) for member in data
+        ):
+            raise TypeError(f"OneBot 群成员列表响应缺少 data: {response!r}")
+        return data
+
+    async def get_stranger_info(self, user_id: int) -> dict[str, Any]:
+        """查询指定 OneBot 用户的陌生人资料。"""
+        response = await self._call_action(
+            "get_stranger_info",
+            {"user_id": user_id},
+        )
+        data = response.get("data")
+        if not isinstance(data, dict):
+            raise TypeError(f"OneBot 陌生人资料响应缺少 data: {response!r}")
+        return data
+
     async def get_group_info(self, group_id: int) -> dict[str, Any]:
         """跳过缓存查询指定 OneBot 群的资料。"""
         response = await self._call_action(

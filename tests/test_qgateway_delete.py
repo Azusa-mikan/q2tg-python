@@ -88,6 +88,62 @@ class QGatewayDeleteTests(unittest.IsolatedAsyncioTestCase):
             {"group_id": 123, "user_id": 456, "no_cache": True},
         )
 
+    async def test_get_group_member_list_always_bypasses_cache(self) -> None:
+        websocket = SimpleNamespace(send_json=AsyncMock())
+        gateway = QGateway()
+        gateway.bind(cast(WebSocket, websocket))
+
+        task = asyncio.create_task(gateway.get_group_member_list(810_001))
+        while websocket.send_json.await_count < 1:
+            await asyncio.sleep(0)
+        request = websocket.send_json.await_args.args[0]
+        gateway.resolve_response(
+            {
+                "status": "ok",
+                "retcode": 0,
+                "data": [
+                    {
+                        "group_id": 810_001,
+                        "user_id": 810_002,
+                        "nickname": "Example Member",
+                        "card": "Sample Card",
+                    }
+                ],
+                "echo": request["echo"],
+            }
+        )
+        members = await task
+
+        self.assertEqual(request["action"], "get_group_member_list")
+        self.assertEqual(
+            request["params"],
+            {"group_id": 810_001, "no_cache": True},
+        )
+        self.assertEqual(members[0]["user_id"], 810_002)
+
+    async def test_get_stranger_info_uses_only_user_id(self) -> None:
+        websocket = SimpleNamespace(send_json=AsyncMock())
+        gateway = QGateway()
+        gateway.bind(cast(WebSocket, websocket))
+
+        task = asyncio.create_task(gateway.get_stranger_info(810_003))
+        while websocket.send_json.await_count < 1:
+            await asyncio.sleep(0)
+        request = websocket.send_json.await_args.args[0]
+        gateway.resolve_response(
+            {
+                "status": "ok",
+                "retcode": 0,
+                "data": {"user_id": 810_003, "nickname": "Example Stranger"},
+                "echo": request["echo"],
+            }
+        )
+        stranger = await task
+
+        self.assertEqual(request["action"], "get_stranger_info")
+        self.assertEqual(request["params"], {"user_id": 810_003})
+        self.assertEqual(stranger["nickname"], "Example Stranger")
+
     async def test_get_group_info_uses_group_id(self) -> None:
         websocket = SimpleNamespace(send_json=AsyncMock())
         gateway = QGateway()

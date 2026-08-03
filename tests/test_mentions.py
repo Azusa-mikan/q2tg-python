@@ -119,7 +119,7 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
                 cast(QGateway, gateway),
             )
 
-        self.assertEqual(text, "@Onebot用户")
+        self.assertEqual(text, "@OneBot 用户")
         warning.assert_called_once()
 
     async def test_id_show_appends_qq_number_to_mention(self) -> None:
