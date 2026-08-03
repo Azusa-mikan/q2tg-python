@@ -22,10 +22,7 @@
   - OneBot 侧以图片段收到的 GIF 会作为 Telegram 动画发送
 - 事件
   - 消息被撤回（群聊）
-  - 成员加入
-  - 成员退出
-  - 成员禁言
-  - 戳一戳
+  - 成员加入和退出
 - 撤回
   - 用户在 Telegram 回复目标消息后使用 `/undo` 发起
   - 命令会撤回 Telegram 和 OneBot 两侧的对应消息
@@ -42,6 +39,9 @@ Telegram 媒体组最多支持 10 项、合计 100 MB；其中每项仍受 20 MB
 
 # 仅 Onebot 到 TG 的消息
 
+- 事件
+  - 成员禁言
+  - 戳一戳
 - 群公告
   - 以 Markdown 文件发送到 Telegram
 - 合并转发（使用 Telegraph）
