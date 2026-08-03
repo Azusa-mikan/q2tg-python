@@ -42,6 +42,8 @@ Telegram 媒体组最多支持 10 项、合计 100 MB；其中每项仍受 20 MB
 
 # 仅 Onebot 到 TG 的消息
 
+- 群公告
+  - 以 Markdown 文件发送到 Telegram
 - 合并转发（使用 Telegraph）
   - OneBot 合并转发会转换为 Telegraph 页面链接发送到 Telegram
   - 需要 Q2TG-Python 能够访问 Telegraph 服务
@@ -49,8 +51,9 @@ Telegram 媒体组最多支持 10 项、合计 100 MB；其中每项仍受 20 MB
 
 # 待支持消息类型
 
-- 群公告
+- 暂无（可提 issue 来许愿你想要的消息类型）
 
 # 明确不准备支持的消息类型
 
 - 闪照
+- 小程序卡片

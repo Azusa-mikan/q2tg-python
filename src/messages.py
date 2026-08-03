@@ -40,6 +40,8 @@ class OneBotMessage:
     tg_chat_id: int | None = None
     # Telegraph 页面创建后跨 Telegram 发送重试复用，避免生成重复页面。
     telegraph_pages: dict[str, TelegraphPageRef] = field(default_factory=dict)
+    # 群公告文件名跨 Telegram 发送重试复用，避免每次尝试生成不同名称。
+    announcement_filename: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

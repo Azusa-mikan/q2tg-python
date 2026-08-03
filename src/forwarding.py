@@ -3,10 +3,14 @@ from __future__ import annotations
 """两个平台之间的消息转换与发送。"""
 
 import asyncio
+import base64
+import binascii
+import json
 from functools import partial
 from pathlib import Path
+from secrets import token_hex
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import filetype
 import httpx
@@ -235,6 +239,49 @@ def onebot_message_media(
     return media, unavailable
 
 
+def onebot_group_announcement(
+    message: list[dict[Any, Any]],
+) -> tuple[str, str | None] | None:
+    """从 Tencent 群公告 JSON 消息段提取正文和首张图片地址。"""
+    for segment in message:
+        if segment.get("type") != "json":
+            continue
+        data = segment.get("data")
+        payload = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(payload, str):
+            continue
+        try:
+            card = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(card, dict) or card.get("app") != "com.tencent.mannounce":
+            continue
+        meta = card.get("meta")
+        announcement = meta.get("mannounce") if isinstance(meta, dict) else None
+        if not isinstance(announcement, dict):
+            continue
+        text = announcement.get("text")
+        if not isinstance(text, str):
+            continue
+        if announcement.get("encode") == 1:
+            try:
+                text = base64.b64decode(text, validate=True).decode("utf-8")
+            except (binascii.Error, UnicodeDecodeError):
+                continue
+        image_url = None
+        pictures = announcement.get("pic")
+        if isinstance(pictures, list) and pictures:
+            picture = pictures[0]
+            image_id = picture.get("url") if isinstance(picture, dict) else None
+            if isinstance(image_id, str) and (image_id := image_id.strip()):
+                image_url = (
+                    "https://gdynamic.qpic.cn/gdynamic/"
+                    f"{quote(image_id, safe='')}/0"
+                )
+        return text, image_url
+    return None
+
+
 def _is_http_url(value: str) -> bool:
     parsed = urlsplit(value.strip())
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
@@ -339,6 +386,7 @@ async def forward_onebot_to_telegram(
     )
     has_faces = any(segment.get("type") == "face" for segment in normalized_message)
     has_forwards = any(segment.get("type") == "forward" for segment in normalized_message)
+    announcement = onebot_group_announcement(normalized_message)
     markdown_v2 = has_faces or has_forwards
     text = await onebot_message_text(
         normalized_message,
@@ -379,7 +427,7 @@ async def forward_onebot_to_telegram(
     if markdown_v2 and super_face_id is None:
         sender_name = escape_markdown(sender_name, version=2)
     media, unavailable = onebot_message_media(normalized_message)
-    if not text and not media and not unavailable:
+    if not text and not media and not unavailable and announcement is None:
         baselog.warning("OneBot 消息没有可转发的内容: %s", msg.message_id)
         return
 
@@ -403,7 +451,52 @@ async def forward_onebot_to_telegram(
                 allow_sending_without_reply=True,
             )
 
-    if super_face_id is not None and not has_forwards:
+    if announcement is not None:
+        body, image_url = announcement
+        if msg.announcement_filename is None:
+            msg.announcement_filename = f"群公告 - {token_hex(8)}.md"
+        if not msg.tg_message_ids:
+            author = ONEBOT_USER_NAME if msg.sender_name_is_fallback else msg.sender_name
+            content = f"{author}:\n\n# 群公告\n\n{body}\n".encode()
+            sent = await bot.send_document(
+                chat_id=group_id,
+                document=InputFile(content, filename=msg.announcement_filename),
+                caption=f"{author}:",
+                reply_parameters=reply_parameters,
+            )
+            msg.tg_message_ids.append(sent.message_id)
+        if image_url is not None and len(msg.tg_message_ids) == 1:
+            image = await download_image(
+                client,
+                image_url,
+                filename="群公告图片.jpg",
+            )
+            try:
+                upload = InputFile(
+                    image.file,
+                    filename=image.filename,
+                    read_file_handle=False,
+                )
+                image_reply = ReplyParameters(
+                    message_id=msg.tg_message_ids[0],
+                    allow_sending_without_reply=True,
+                )
+                if image.size <= PHOTO_LIMIT:
+                    sent = await bot.send_photo(
+                        chat_id=group_id,
+                        photo=upload,
+                        reply_parameters=image_reply,
+                    )
+                else:
+                    sent = await bot.send_document(
+                        chat_id=group_id,
+                        document=upload,
+                        reply_parameters=image_reply,
+                    )
+                msg.tg_message_ids.append(sent.message_id)
+            finally:
+                image.close()
+    elif super_face_id is not None and not has_forwards:
         sticker_file_id = await onebot_super_face_file_id(bot, super_face_id)
         if sticker_file_id is not None:
             if not msg.tg_message_ids:
