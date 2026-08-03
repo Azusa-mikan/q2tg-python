@@ -36,7 +36,8 @@ def migrate_database(database_url: URL) -> None:
 async def _inspect_database(
     database_url: URL,
 ) -> tuple[set[str], set[str], set[str], int]:
-    if database_url.get_backend_name() == "sqlite" and database_url.database:
+    is_sqlite = database_url.get_backend_name() == "sqlite"
+    if is_sqlite and database_url.database:
         Path(database_url.database).parent.mkdir(parents=True, exist_ok=True)
 
     engine = create_async_engine(database_url, poolclass=sa.pool.NullPool)
@@ -63,7 +64,7 @@ async def _inspect_database(
                 )
                 indexes = {name for name in index_names if name is not None}
             user_version = 0
-            if database_url.get_backend_name() == "sqlite":
+            if is_sqlite:
                 user_version = int(
                     (await connection.exec_driver_sql("PRAGMA user_version")).scalar_one()
                 )
@@ -86,13 +87,14 @@ def _upgrade_database(
     )
     config.attributes["configure_logger"] = False
     application_tables = tables & HEAD_TABLES
+    is_sqlite = database_url.get_backend_name() == "sqlite"
 
     if "alembic_version" in tables:
         pass
     elif not application_tables:
-        if database_url.get_backend_name() == "sqlite" and user_version != 0:
+        if is_sqlite and user_version != 0:
             raise RuntimeError(f"无法识别 SQLite 数据库版本 {user_version}")
-    elif database_url.get_backend_name() != "sqlite":
+    elif not is_sqlite:
         raise RuntimeError("非空数据库缺少 Alembic 版本标记，拒绝自动接管")
     elif application_tables == LEGACY_TABLES and user_version == 0:
         command.stamp(config, LEGACY_REVISION)

@@ -16,7 +16,7 @@ class ApiLifecycleTests(unittest.IsolatedAsyncioTestCase):
             patch("src.api.sql.close", new_callable=AsyncMock) as close,
             patch("src.api.media_cache.close") as close_media,
             patch("src.api.purge_cache", new_callable=AsyncMock) as purge,
-            patch("src.api.baselog.exception"),
+            patch("src.lifecycle.baselog.exception"),
         ):
             purge.side_effect = RuntimeError("purger failed")
             async with lifespan(cast(FastAPI, SimpleNamespace())):

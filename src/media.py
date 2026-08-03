@@ -5,13 +5,23 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from secrets import token_urlsafe
-from tempfile import SpooledTemporaryFile
+from tempfile import NamedTemporaryFile, SpooledTemporaryFile
 from typing import Any
 
 from src.paths import ensure_temp_dir
+
+# 转码产物大小上限，与 Telegram Bot API 通过 getFile 下载的平台硬上限一致。
+MEDIA_SIZE_LIMIT = 20_000_000
+# 供错误文案展示的上限，随 MEDIA_SIZE_LIMIT 自动跟随，避免阈值与文案分别维护。
+MEDIA_SIZE_LIMIT_TEXT = f"{MEDIA_SIZE_LIMIT // 1_000_000} MB"
+# 所有 ffmpeg 调用共用的基础参数：禁用交互、隐藏 banner、只输出错误、覆盖输出。
+FFMPEG_BASE_ARGS = ("ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y")
+# 子进程 stderr 解码后保留的末尾字节数，避免超长日志淹没错误信息。
+PROCESS_ERROR_TAIL = 500
 
 SPOOL_MEMORY_LIMIT = 1 * 1024 * 1024
 # 落盘后的 SpooledTemporaryFile 会持续占用一个文件描述符。这里限制的不只是
@@ -70,6 +80,40 @@ def replace_media_content(media: MediaFile, output_path: Path) -> None:
         while chunk := converted.read(STREAM_CHUNK_SIZE):
             media.write(chunk)
     media.rewind()
+
+
+def decode_process_error(stderr: bytes) -> str:
+    """解码子进程 stderr，只保留末尾片段，避免超长日志淹没错误信息。"""
+    error = stderr.decode("utf-8", errors="replace").strip()
+    return error[-PROCESS_ERROR_TAIL:] if error else "未知错误"
+
+
+@asynccontextmanager
+async def transcode_target(suffix: str) -> AsyncIterator[Path]:
+    """在临时目录创建转码输出文件，并在结束时无条件删除。"""
+    with NamedTemporaryFile(suffix=suffix, delete=False, dir=str(ensure_temp_dir())) as output:
+        output_path = Path(output.name)
+    try:
+        yield output_path
+    finally:
+        output_path.unlink(missing_ok=True)
+
+
+def finalize_media(
+    media: MediaFile,
+    output_path: Path,
+    *,
+    stem_fallback: str,
+    suffix: str,
+    media_type: str,
+) -> None:
+    """用转码产物覆盖 MediaFile，并统一设置文件名与媒体类型。
+
+    内部是同步操作；需要避免阻塞事件循环时，调用方应使用 asyncio.to_thread 包裹。
+    """
+    replace_media_content(media, output_path)
+    media.filename = f"{Path(media.filename).stem or stem_fallback}{suffix}"
+    media.media_type = media_type
 
 
 class ByteBudget:

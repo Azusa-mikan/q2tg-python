@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
 from src.bus import message_bus
-from src.log import baselog
+from src.lifecycle import await_cancelled
 from src.media import MediaStream, media_cache
 from src.processing import media_processor
 from src.sql import sql
@@ -79,30 +79,19 @@ async def lifespan(app: FastAPI):
         cache_purger.cancel()
         retry_dispatcher.cancel()
         media_worker.cancel()
+        # 先并行取消上面三个后台任务，再逐个回收；任一任务回收失败也不跳过
+        # 后续资源关闭。缓存清理任务在取消前失败时记录后继续，其余只吞取消。
         try:
-            await cache_purger
-        except asyncio.CancelledError:
-            pass
-        except Exception:  # noqa: BLE001
-            # 清理任务可能在 lifespan 退出前已经失败，不能因此跳过资源关闭。
-            baselog.exception("缓存定时清理任务异常退出")
+            await await_cancelled(cache_purger, log_label="缓存定时清理任务异常退出")
+            await await_cancelled(retry_dispatcher)
+            await await_cancelled(media_worker)
         finally:
+            await media_processor.close()
+            media_cache.close()
             try:
-                await retry_dispatcher
-            except asyncio.CancelledError:
-                pass
+                await telegraph_client.close()
             finally:
-                try:
-                    await media_worker
-                except asyncio.CancelledError:
-                    pass
-                finally:
-                    await media_processor.close()
-                    media_cache.close()
-                    try:
-                        await telegraph_client.close()
-                    finally:
-                        await sql.close()
+                await sql.close()
 
 # FastAPI 是媒体 HTTP 接口和 SnowLuma WebSocket 路由的统一挂载入口。
 fapp = FastAPI(lifespan=lifespan)

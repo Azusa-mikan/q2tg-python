@@ -3,17 +3,18 @@
 import asyncio
 import json
 import time
-from pathlib import Path
-from tempfile import NamedTemporaryFile
 
 from src.log import baselog
 from src.media import (
+    FFMPEG_BASE_ARGS,
+    MEDIA_SIZE_LIMIT_TEXT,
     MediaFile,
     communicate_media_process,
-    replace_media_content,
+    decode_process_error,
+    finalize_media,
     start_media_process,
+    transcode_target,
 )
-from src.paths import ensure_temp_dir
 
 PROBE_TIMEOUT = 30
 TRANSCODE_TIMEOUT = 300
@@ -32,22 +33,11 @@ async def normalize_video_for_onebot(media: MediaFile, *, size_limit: int) -> No
         return
 
     started_at = time.monotonic()
-    with NamedTemporaryFile(
-        suffix=".mp4",
-        delete=False,
-        dir=str(ensure_temp_dir()),
-    ) as output:
-        output_path = Path(output.name)
-    try:
+    async with transcode_target(".mp4") as output_path:
         input_fd = media.file.fileno()
         media.rewind()
         process = await start_media_process(
-            "ffmpeg",
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
+            *FFMPEG_BASE_ARGS,
             "-i",
             f"/proc/self/fd/{input_fd}",
             "-map",
@@ -78,16 +68,19 @@ async def normalize_video_for_onebot(media: MediaFile, *, size_limit: int) -> No
             timeout_error="Telegram 视频处理超时",
         )
         if process.returncode != 0:
-            raise ValueError(f"Telegram 视频转码失败: {_safe_error(stderr)}")
+            raise ValueError(f"Telegram 视频转码失败: {decode_process_error(stderr)}")
         if output_path.stat().st_size > size_limit:
-            raise ValueError("Telegram 视频转码后超过 20 MB 上限")
+            raise ValueError(f"Telegram 视频转码后超过 {MEDIA_SIZE_LIMIT_TEXT} 上限")
 
-        await asyncio.to_thread(replace_media_content, media, output_path)
-        media.filename = f"{Path(media.filename).stem or 'video'}.mp4"
-        media.media_type = "video/mp4"
+        await asyncio.to_thread(
+            finalize_media,
+            media,
+            output_path,
+            stem_fallback="video",
+            suffix=".mp4",
+            media_type="video/mp4",
+        )
         baselog.info("视频转码完成，耗时 %.2f 秒", time.monotonic() - started_at)
-    finally:
-        output_path.unlink(missing_ok=True)
 
 
 async def _probe_codecs(media: MediaFile) -> tuple[str | None, tuple[str, ...]]:
@@ -112,7 +105,7 @@ async def _probe_codecs(media: MediaFile) -> tuple[str | None, tuple[str, ...]]:
         timeout_error="Telegram 视频处理超时",
     )
     if process.returncode != 0:
-        raise ValueError(f"Telegram 视频格式检测失败: {_safe_error(stderr)}")
+        raise ValueError(f"Telegram 视频格式检测失败: {decode_process_error(stderr)}")
     try:
         streams = json.loads(stdout).get("streams", [])
     except (json.JSONDecodeError, AttributeError):
@@ -134,8 +127,3 @@ async def _probe_codecs(media: MediaFile) -> tuple[str | None, tuple[str, ...]]:
     if video_codec is None:
         raise ValueError("Telegram 视频中没有可用的视频流")
     return video_codec, audio_codecs
-
-
-def _safe_error(stderr: bytes) -> str:
-    error = stderr.decode("utf-8", errors="replace").strip()
-    return error[-500:] if error else "未知错误"

@@ -22,11 +22,8 @@ class RuntimeStatsTest(unittest.IsolatedAsyncioTestCase):
 
     @staticmethod
     def _clear_conversion_times() -> None:
-        conversion_times.voice.clear()
-        conversion_times.video.clear()
-        conversion_times.sticker_static.clear()
-        conversion_times.sticker_tgs.clear()
-        conversion_times.sticker_video.clear()
+        for samples in conversion_times.values():
+            samples.clear()
 
     def test_get_rss_scales_resident_memory(self) -> None:
         process = MagicMock()
@@ -71,7 +68,7 @@ class RuntimeStatsTest(unittest.IsolatedAsyncioTestCase):
             for _ in range(31):
                 self.assertEqual(await track_conversion("video", operation()), "result")
 
-        self.assertEqual(list(conversion_times.video), [0.5] * 30)
+        self.assertEqual(list(conversion_times["video"]), [0.5] * 30)
         self.assertEqual(
             _get_conversion_averages(),
             ConversionAverages(
@@ -90,7 +87,7 @@ class RuntimeStatsTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "failed"):
             await track_conversion("video", fail())
 
-        self.assertEqual(list(conversion_times.video), [])
+        self.assertEqual(list(conversion_times["video"]), [])
 
     def test_get_runtime_info_returns_complete_snapshot(self) -> None:
         queues = QueueSizes(
