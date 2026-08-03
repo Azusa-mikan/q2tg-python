@@ -1,11 +1,14 @@
 name: Build and publish Docker image
-run-name: Docker ${{ inputs.version || format('run-{0}', github.run_number) }}
+run-name: Docker ${{ github.event_name == 'push' && github.ref_name || inputs.version || format('run-{0}', github.run_number) }}
 
 on:
+  push:
+    tags:
+      - "*"
   workflow_dispatch:
     inputs:
       version:
-        description: 可选版本标签，例如 v1.0.0；留空时只发布 latest 和提交 SHA
+        description: 可选版本标签，例如 1.0.0；留空时只发布 latest 和提交 SHA
         required: false
         type: string
 
@@ -24,7 +27,7 @@ jobs:
       - name: Set image metadata
         id: metadata
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
         run: |
           if [[ -n "$VERSION" && ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
             echo "Invalid Docker version tag: $VERSION" >&2

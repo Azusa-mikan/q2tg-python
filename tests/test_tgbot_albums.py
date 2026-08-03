@@ -203,6 +203,69 @@ class TelegramAlbumTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(media_item_budget.used, initial_items)
         self.assertEqual(media_queue_budget.used, initial_bytes)
 
+    async def test_audio_is_forwarded_as_onebot_file(self) -> None:
+        initial_items = media_item_budget.used
+        initial_bytes = media_queue_budget.used
+        audio = SimpleNamespace(
+            file_size=5,
+            file_name="example-song.mp3",
+            mime_type="audio/mpeg",
+            get_file=AsyncMock(
+                return_value=SimpleNamespace(
+                    file_size=5,
+                    file_path="https://example.test/audio",
+                )
+            ),
+        )
+        message = cast(
+            Message,
+            SimpleNamespace(
+                message_id=5,
+                chat_id=-456,
+                from_user=SimpleNamespace(id=7, full_name="Telegram User"),
+                sticker=None,
+                video=None,
+                voice=None,
+                photo=(),
+                audio=audio,
+                document=None,
+                caption="audio caption",
+                reply_to_message=None,
+                get_bot=lambda: SimpleNamespace(),
+            ),
+        )
+        handler = TGhandlers()
+        handler.download_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, content=b"audio", request=request)
+            )
+        )
+        try:
+            with (
+                patch(
+                    "src.tgbot.handlers.sql.get_tg_forward_enabled",
+                    new_callable=AsyncMock,
+                    return_value=True,
+                ),
+                patch("src.tgbot.handlers.message_bus.put", new_callable=AsyncMock) as put,
+            ):
+                await handler._enqueue_media([message])
+
+            assert put.await_args is not None
+            task = put.await_args.args[0]
+            forwarded = task.send.args[0]
+            self.assertEqual(forwarded.media[0].kind, "file")
+            self.assertEqual(forwarded.media[0].content.filename, "example-song.mp3")
+            self.assertEqual(forwarded.media[0].content.media_type, "audio/mpeg")
+            self.assertEqual(forwarded.text, "audio caption")
+            assert task.finalize is not None
+            await task.finalize()
+        finally:
+            await handler.download_client.aclose()
+
+        self.assertEqual(media_item_budget.used, initial_items)
+        self.assertEqual(media_queue_budget.used, initial_bytes)
+
     async def test_photo_over_10_mb_is_allowed_up_to_download_limit(self) -> None:
         size = 10_000_001
         photo = SimpleNamespace(

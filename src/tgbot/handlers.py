@@ -493,9 +493,9 @@ class TGhandlers:
         """下载一组 Telegram 媒体，取得资源预算后放入消息队列。
 
          Telegram 的 Message.photo 是同一张照片的多个尺寸，不是多张照片；这里
-        选择最后一个最大尺寸。video、voice 和 document 分别映射为 Onebot 的
-        video、record 和 file。函数成功入队后，MediaFile 所有权交给转发任务；
-        此前的异常或取消路径由本函数清理。
+        选择最后一个最大尺寸。video、voice、audio 和 document 分别映射为
+        Onebot 的 video、record、file 和 file。函数成功入队后，MediaFile 所有权
+        交给转发任务；此前的异常或取消路径由本函数清理。
         """
         # Update 到达次序不一定稳定，按 message_id 恢复用户发送的相册顺序。
         messages.sort(key=lambda message: message.message_id)
@@ -543,6 +543,8 @@ class TGhandlers:
                 sources.append(("record", voice, TELEGRAM_DOWNLOAD_LIMIT, "none"))
             elif message.photo:
                 sources.append(("image", message.photo[-1], TELEGRAM_DOWNLOAD_LIMIT, "none"))
+            elif (audio := getattr(message, "audio", None)) is not None:
+                sources.append(("file", audio, TELEGRAM_DOWNLOAD_LIMIT, "none"))
             elif (document := message.document) is not None:
                 sources.append(("file", document, TELEGRAM_DOWNLOAD_LIMIT, "none"))
 
@@ -702,6 +704,7 @@ class TGhandlers:
             filters.PHOTO
             | filters.VIDEO
             | filters.VOICE
+            | filters.AUDIO
             | filters.Document.ALL
             | filters.Sticker.ALL
         )
