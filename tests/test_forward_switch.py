@@ -1,10 +1,11 @@
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
+import pytest_asyncio
 from telegram import ChatMember, Update
 from telegram.ext import ContextTypes
 
@@ -14,17 +15,20 @@ from src.sql import Sql
 from src.tgbot.handlers import TGhandlers
 
 
-class ForwardSwitchTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
+@pytest.mark.asyncio
+class TestForwardSwitch:
+    @pytest_asyncio.fixture(autouse=True)
+    async def setup_database(self):
         self.directory = TemporaryDirectory()
         self.sql = Sql(Path(self.directory.name) / "q2tg.db")
         await self.sql.load()
         await self.sql.bind_group(123, -456)
         self.handler = TGhandlers()
-
-    async def asyncTearDown(self) -> None:
-        await self.sql.close()
-        self.directory.cleanup()
+        try:
+            yield
+        finally:
+            await self.sql.close()
+            self.directory.cleanup()
 
     async def _forward(self, *, args: list[str], status: str):
         message = SimpleNamespace(reply_text=AsyncMock())
@@ -102,7 +106,7 @@ class ForwardSwitchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_group_admin_can_disable_and_enable_forwarding(self) -> None:
         message, gateway = await self._forward(args=["off"], status=ChatMember.ADMINISTRATOR)
-        self.assertFalse(await self.sql.get_tg_forward_enabled(-456))
+        assert not await self.sql.get_tg_forward_enabled(-456)
         message.reply_text.assert_awaited_once_with("Telegram → OneBot 转发已关闭")
         gateway.send_group_message.assert_awaited_once_with(
             group_id=123,
@@ -110,21 +114,21 @@ class ForwardSwitchTests(unittest.IsolatedAsyncioTestCase):
         )
 
         message, gateway = await self._forward(args=["on"], status=ChatMember.OWNER)
-        self.assertTrue(await self.sql.get_tg_forward_enabled(-456))
+        assert await self.sql.get_tg_forward_enabled(-456)
         message.reply_text.assert_awaited_once_with("Telegram → OneBot 转发已开启")
         gateway.send_group_message.assert_awaited_once()
 
     async def test_regular_member_cannot_change_forwarding(self) -> None:
         message, gateway = await self._forward(args=["off"], status=ChatMember.MEMBER)
-        self.assertTrue(await self.sql.get_tg_forward_enabled(-456))
+        assert await self.sql.get_tg_forward_enabled(-456)
         message.reply_text.assert_awaited_once_with("只有群聊管理员可以设置转发开关")
         gateway.send_group_message.assert_not_awaited()
 
     async def test_group_admin_can_disable_and_query_id_show(self) -> None:
-        self.assertTrue(await self.sql.get_id_show_enabled(-456))
+        assert await self.sql.get_id_show_enabled(-456)
 
         message = await self._id_show(args=["off"], status=ChatMember.ADMINISTRATOR)
-        self.assertFalse(await self.sql.get_id_show_enabled(-456))
+        assert not await self.sql.get_id_show_enabled(-456)
         message.reply_text.assert_awaited_once_with("OneBot 用户及 @ 对象 ID 显示已关闭")
 
         message = await self._id_show(args=[], status=ChatMember.OWNER)
@@ -132,14 +136,14 @@ class ForwardSwitchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_regular_member_cannot_change_id_show(self) -> None:
         message = await self._id_show(args=["off"], status=ChatMember.MEMBER)
-        self.assertTrue(await self.sql.get_id_show_enabled(-456))
+        assert await self.sql.get_id_show_enabled(-456)
         message.reply_text.assert_awaited_once_with("只有群聊管理员可以设置 ID 显示")
 
     async def test_group_admin_can_enable_and_query_bot_forward(self) -> None:
-        self.assertFalse(await self.sql.get_bot_forward_enabled(-456))
+        assert not await self.sql.get_bot_forward_enabled(-456)
 
         message = await self._bot_forward(args=["on"], status=ChatMember.ADMINISTRATOR)
-        self.assertTrue(await self.sql.get_bot_forward_enabled(-456))
+        assert await self.sql.get_bot_forward_enabled(-456)
         message.reply_text.assert_awaited_once_with("其他 Bot 消息转发已开启")
 
         message = await self._bot_forward(args=[], status=ChatMember.OWNER)
@@ -147,9 +151,5 @@ class ForwardSwitchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_regular_member_cannot_enable_bot_forward(self) -> None:
         message = await self._bot_forward(args=["on"], status=ChatMember.MEMBER)
-        self.assertFalse(await self.sql.get_bot_forward_enabled(-456))
+        assert not await self.sql.get_bot_forward_enabled(-456)
         message.reply_text.assert_awaited_once_with("只有群聊管理员可以设置其他 Bot 消息转发")
-
-
-if __name__ == "__main__":
-    unittest.main()

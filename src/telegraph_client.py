@@ -7,6 +7,7 @@ import httpx
 from telegraph.aio import Telegraph
 
 from src.config import config
+from src.runtime_events import emit_runtime_event
 from src.sql import Sql, sql
 
 TELEGRAPH_TOKEN_KEY = "telegraph_access_token"
@@ -32,6 +33,7 @@ class TelegraphClient:
         url = page.get("url")
         if not isinstance(url, str) or not url:
             raise RuntimeError(f"Telegraph 创建页面响应缺少 URL: {page!r}")
+        emit_runtime_event("capability.succeeded", "onebot.forward.telegraph")
         return url
 
     async def close(self) -> None:

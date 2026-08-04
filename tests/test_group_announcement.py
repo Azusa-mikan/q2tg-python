@@ -1,10 +1,10 @@
 import json
-import unittest
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 from telegram import InputFile, ReplyParameters
 from telegram.ext import ExtBot
 
@@ -42,18 +42,15 @@ def announcement_segment() -> dict:
     }
 
 
-class GroupAnnouncementTests(unittest.IsolatedAsyncioTestCase):
+class TestGroupAnnouncement:
     def test_encoded_announcement_is_decoded(self) -> None:
-        self.assertEqual(
-            onebot_group_announcement([announcement_segment()]),
-            (
+        assert onebot_group_announcement([announcement_segment()]) == (
                 "测试\n测试1",
                 "https://gdynamic.qpic.cn/gdynamic/announcement-image-id/0",
-            ),
-        )
+            )
 
     def test_unrelated_or_malformed_json_is_ignored(self) -> None:
-        self.assertIsNone(
+        assert (
             onebot_group_announcement(
                 [
                     {"type": "json", "data": {"data": "not-json"}},
@@ -63,8 +60,10 @@ class GroupAnnouncementTests(unittest.IsolatedAsyncioTestCase):
                     },
                 ]
             )
+            is None
         )
 
+    @pytest.mark.asyncio
     async def test_announcement_is_sent_as_markdown_file_and_reuses_filename(
         self,
     ) -> None:
@@ -109,7 +108,7 @@ class GroupAnnouncementTests(unittest.IsolatedAsyncioTestCase):
                     return_value=image,
                 ) as download,
             ):
-                with self.assertRaisesRegex(RuntimeError, "temporary failure"):
+                with pytest.raises(RuntimeError, match="temporary failure"):
                     await forward_onebot_to_telegram(
                         message,
                         cast(ExtBot[None], bot),
@@ -124,20 +123,17 @@ class GroupAnnouncementTests(unittest.IsolatedAsyncioTestCase):
             image.close()
 
         token.assert_called_once_with(8)
-        self.assertEqual(bot.send_document.await_count, 2)
+        assert bot.send_document.await_count == 2
         for call in bot.send_document.await_args_list:
             document = call.kwargs["document"]
-            self.assertIsInstance(document, InputFile)
-            self.assertEqual(document.filename, "群公告 - 0123456789abcdef.md")
-            self.assertEqual(
-                document.input_file_content,
-                (
-                    "测试群名片:\n\n"
-                    "# 群公告\n\n"
-                    "测试\n测试1\n"
-                ).encode(),
-            )
-            self.assertEqual(call.kwargs["caption"], "测试群名片:")
+            assert isinstance(document, InputFile)
+            assert document.filename == "群公告 - 0123456789abcdef.md"
+            assert document.input_file_content == (
+                "测试群名片:\n\n"
+                "# 群公告\n\n"
+                "测试\n测试1\n"
+            ).encode()
+            assert call.kwargs["caption"] == "测试群名片:"
         download.assert_awaited_once_with(
             cast(httpx.AsyncClient, SimpleNamespace()),
             "https://gdynamic.qpic.cn/gdynamic/announcement-image-id/0",
@@ -145,12 +141,13 @@ class GroupAnnouncementTests(unittest.IsolatedAsyncioTestCase):
         )
         bot.send_photo.assert_awaited_once()
         image_reply = bot.send_photo.await_args.kwargs["reply_parameters"]
-        self.assertIsInstance(image_reply, ReplyParameters)
-        self.assertEqual(image_reply.message_id, 201)
-        self.assertTrue(image_reply.allow_sending_without_reply)
-        self.assertEqual(message.tg_message_ids, [201, 202])
+        assert isinstance(image_reply, ReplyParameters)
+        assert image_reply.message_id == 201
+        assert not image_reply.allow_sending_without_reply
+        assert message.tg_message_ids == [201, 202]
         database.set_message_mapping.assert_awaited_once()
 
+    @pytest.mark.asyncio
     async def test_missing_nickname_and_image_use_expected_fallback(self) -> None:
         segment = announcement_segment()
         payload = json.loads(segment["data"]["data"])
@@ -182,12 +179,13 @@ class GroupAnnouncementTests(unittest.IsolatedAsyncioTestCase):
             )
 
         document = bot.send_document.await_args.kwargs["document"]
-        self.assertEqual(
-            document.input_file_content,
-            "OneBot 用户:\n\n# 群公告\n\n测试\n测试1\n".encode(),
+        assert (
+            document.input_file_content
+            == "OneBot 用户:\n\n# 群公告\n\n测试\n测试1\n".encode()
         )
-        self.assertEqual(bot.send_document.await_args.kwargs["caption"], "OneBot 用户:")
+        assert bot.send_document.await_args.kwargs["caption"] == "OneBot 用户:"
 
+    @pytest.mark.asyncio
     async def test_id_show_only_affects_announcement_caption(self) -> None:
         segment = announcement_segment()
         payload = json.loads(segment["data"]["data"])
@@ -218,15 +216,13 @@ class GroupAnnouncementTests(unittest.IsolatedAsyncioTestCase):
             )
 
         document = bot.send_document.await_args.kwargs["document"]
-        self.assertEqual(
-            document.input_file_content,
-            "Example Card:\n\n# 群公告\n\n测试\n测试1\n".encode(),
+        assert (
+            document.input_file_content
+            == "Example Card:\n\n# 群公告\n\n测试\n测试1\n".encode()
         )
-        self.assertEqual(
-            bot.send_document.await_args.kwargs["caption"],
-            "Example Card[456]:",
-        )
+        assert bot.send_document.await_args.kwargs["caption"] == "Example Card[456]:"
 
+    @pytest.mark.asyncio
     async def test_image_retry_replies_to_existing_announcement_document(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, content=b"image", request=request)
@@ -256,7 +252,7 @@ class GroupAnnouncementTests(unittest.IsolatedAsyncioTestCase):
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             with patch("src.forwarding.sql", database):
-                with self.assertRaisesRegex(RuntimeError, "temporary image failure"):
+                with pytest.raises(RuntimeError, match="temporary image failure"):
                     await forward_onebot_to_telegram(
                         message,
                         cast(ExtBot[None], bot),
@@ -269,14 +265,10 @@ class GroupAnnouncementTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         bot.send_document.assert_awaited_once()
-        self.assertEqual(bot.send_photo.await_count, 2)
+        assert bot.send_photo.await_count == 2
         for call in bot.send_photo.await_args_list:
             reply = call.kwargs["reply_parameters"]
-            self.assertEqual(reply.message_id, 301)
-            self.assertTrue(reply.allow_sending_without_reply)
-        self.assertEqual(message.tg_message_ids, [301, 302])
+            assert reply.message_id == 301
+            assert not reply.allow_sending_without_reply
+        assert message.tg_message_ids == [301, 302]
         database.set_message_mapping.assert_awaited_once()
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from src.log import baselog
+from src.runtime_events import emit_runtime_event, runtime_work
 
 MEDIA_PROCESSING_QUEUE_SIZE = 16
 
@@ -33,6 +34,7 @@ class MediaProcessor:
             self.queue.put_nowait(task)
         except QueueFull:
             return False
+        emit_runtime_event("processing.enqueued", task.label)
         return True
 
     async def run(self) -> None:
@@ -41,9 +43,13 @@ class MediaProcessor:
             task = await self.queue.get()
             transferred = False
             try:
-                await task.run()
+                emit_runtime_event("processing.started", task.label)
+                with runtime_work(task.label):
+                    await task.run()
                 transferred = True
+                emit_runtime_event("processing.succeeded", task.label)
             except Exception as error:  # noqa: BLE001
+                emit_runtime_event("processing.failed", task.label, error=error)
                 baselog.exception("媒体预处理失败: %s", task.label)
                 if task.on_error is not None:
                     try:

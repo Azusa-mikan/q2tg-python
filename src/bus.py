@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 from src.log import baselog
 from src.messages import FailureAction, SendLane, SendTarget, SendTask
+from src.runtime_events import emit_runtime_event, runtime_work
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +41,7 @@ class MessageBus:
     async def put(self, task: SendTask) -> None:
         """按任务目标路由，并对异步生产者施加背压。"""
         await self._target_queue(task.target, task.lane).put(task)
+        emit_runtime_event("send.enqueued", task.label)
 
     def put_nowait(self, task: SendTask) -> bool:
         """按任务目标立即入队；满队列时返回 False。"""
@@ -47,6 +49,7 @@ class MessageBus:
             self._target_queue(task.target, task.lane).put_nowait(task)
         except QueueFull:
             return False
+        emit_runtime_event("send.enqueued", task.label)
         return True
 
     async def stop_consumer(
@@ -99,15 +102,20 @@ class MessageBus:
         while True:
             item = await queue.get()
             requeued = False
+            sent = False
             try:
                 if isinstance(item, Shutdown):
                     return
                 if not isinstance(item, SendTask):
                     raise TypeError(f"未知队列项: {type(item)!r}")
                 try:
-                    await item.send()
+                    emit_runtime_event("send.started", item.label)
+                    with runtime_work(item.label):
+                        await item.send()
+                    sent = True
                 except Exception as error:  # noqa: BLE001
                     action = item.failure_action(error)
+                    emit_runtime_event("send.attempt_failed", item.label, error=error)
                     if action is FailureAction.DEFER:
                         requeued = True
                         self.retry_queue.put_nowait(item)
@@ -118,18 +126,23 @@ class MessageBus:
                             requeued = True
                             self.retry_queue.put_nowait(item)
                         else:
+                            emit_runtime_event("send.failed", item.label, error=error)
                             await self._run_failed(item, error, exhausted=True)
                     else:
+                        emit_runtime_event("send.failed", item.label, error=error)
                         baselog.exception("发送任务失败，不重试: %s", item.label)
                         await self._run_failed(item, error, exhausted=False)
                 except asyncio.CancelledError:
                     # 连接关闭可能取消正在等待 RPC 的 OneBot 任务；保留任务给下次连接。
                     requeued = True
                     self.retry_queue.put_nowait(item)
+                    emit_runtime_event("send.cancelled", item.label)
                     raise
             finally:
                 if isinstance(item, SendTask) and not requeued:
-                    await self._finalize(item)
+                    finalized = await self._finalize(item)
+                    if sent and finalized:
+                        emit_runtime_event("send.succeeded", item.label)
                 queue.task_done()
 
     async def _run_failed(
@@ -148,17 +161,21 @@ class MessageBus:
         if task.on_failed is None:
             return
         try:
-            await task.on_failed(error)
+            with runtime_work(task.label):
+                await task.on_failed(error)
         except Exception:  # noqa: BLE001
             baselog.exception("发送任务最终失败后的处理失败: %s", task.label)
 
-    async def _finalize(self, task: SendTask) -> None:
+    async def _finalize(self, task: SendTask) -> bool:
         if task.finalize is None:
-            return
+            return True
         try:
             await task.finalize()
         except Exception:  # noqa: BLE001
             baselog.exception("发送任务资源清理失败: %s", task.label)
+            emit_runtime_event("send.finalize_failed", task.label)
+            return False
+        return True
 
     def _target_queue(
         self,

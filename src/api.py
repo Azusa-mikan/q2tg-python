@@ -11,6 +11,7 @@ from src.bus import message_bus
 from src.lifecycle import await_cancelled
 from src.media import MediaStream, media_cache
 from src.processing import media_processor
+from src.runtime_events import emit_runtime_event
 from src.sql import sql
 from src.telegraph_client import telegraph_client
 from src.ws import router as ws_router
@@ -73,9 +74,11 @@ async def lifespan(app: FastAPI):
         media_processor.run(),
         name="media-processing-worker",
     )
+    emit_runtime_event("service.ready", "uvicorn")
     try:
         yield
     finally:
+        emit_runtime_event("service.stopping", "uvicorn")
         cache_purger.cancel()
         retry_dispatcher.cancel()
         media_worker.cancel()
@@ -92,6 +95,7 @@ async def lifespan(app: FastAPI):
                 await telegraph_client.close()
             finally:
                 await sql.close()
+                emit_runtime_event("service.stopped", "uvicorn")
 
 # FastAPI 是媒体 HTTP 接口和 SnowLuma WebSocket 路由的统一挂载入口。
 fapp = FastAPI(lifespan=lifespan)

@@ -1,14 +1,15 @@
-import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from telegram.ext import CommandHandler
 
 from src.runtime_stats import ConversionAverages, QueueSizes, RuntimeInfo
 from src.tgbot.handlers import TGhandlers
 
 
-class StatusHandlerTest(unittest.IsolatedAsyncioTestCase):
+class TestStatusHandler:
+    @pytest.mark.asyncio
     async def test_status_replies_with_runtime_info(self) -> None:
         message = SimpleNamespace(reply_text=AsyncMock())
         update = SimpleNamespace(effective_message=message)
@@ -66,4 +67,4 @@ class StatusHandlerTest(unittest.IsolatedAsyncioTestCase):
             if isinstance(handler, CommandHandler)
         ]
 
-        self.assertIn(frozenset({"status"}), commands)
+        assert frozenset({"status"}) in commands

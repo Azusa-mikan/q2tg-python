@@ -22,6 +22,7 @@ from src.lifecycle import await_cancelled
 from src.log import baselog
 from src.messages import SendLane, SendTarget
 from src.qbot import q_gateway, receive_onebot_event
+from src.runtime_events import emit_runtime_event
 from src.tgbot import TGBot
 
 # PTB 只在通过认证的 SnowLuma 会话存续期间运行，但重连时复用同一个 Application。
@@ -94,6 +95,7 @@ async def snowluma_ws(websocket: WebSocket) -> None:
                         message_bus.consume(target, lane),
                         name=f"{target.name.lower()}-{lane.name.lower()}-consumer",
                     )
+            emit_runtime_event("bridge.ready", "onebot-websocket")
             while True:
                 data = await websocket.receive_json()
                 if q_gateway.resolve_response(data):

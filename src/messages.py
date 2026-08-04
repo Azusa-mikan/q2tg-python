@@ -58,6 +58,7 @@ class OneBotMessage:
     self_id: int | None = None
     sender_name_is_fallback: bool = False
     reply_message_id: int | None = None
+    reply_unavailable: bool = False
     # Telegram 发送可能在多媒体中途失败。进度保存在任务 DTO 中，使重试不会
     # 重复发送已经成功的前序媒体。
     tg_message_ids: list[int] = field(default_factory=list)

@@ -1,4 +1,3 @@
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -6,6 +5,8 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
+import pytest_asyncio
 from telegram import LinkPreviewOptions
 from telegram.ext import ExtBot
 
@@ -20,17 +21,20 @@ from src.qbot import QGateway
 from src.sql import Sql
 
 
-class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
+@pytest.mark.asyncio
+class TestVideoForwarding:
+    @pytest_asyncio.fixture(autouse=True)
+    async def setup(self):
         self.directory = TemporaryDirectory()
         self.database = Sql(Path(self.directory.name) / "video.sqlite3")
         await self.database.load()
         await self.database.bind_group(123, -456)
-
-    async def asyncTearDown(self) -> None:
-        media_cache.close()
-        await self.database.close()
-        self.directory.cleanup()
+        try:
+            yield
+        finally:
+            media_cache.close()
+            await self.database.close()
+            self.directory.cleanup()
 
     async def test_telegram_video_sends_text_and_video_separately(self) -> None:
         initial_items = media_item_budget.used
@@ -49,24 +53,22 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         with patch("src.forwarding.sql", self.database):
             await forward_telegram_to_onebot(message, cast(QGateway, gateway))
 
-        self.assertEqual(gateway.send_group_message.await_count, 2)
+        assert gateway.send_group_message.await_count == 2
         first_segments = gateway.send_group_message.await_args_list[0].kwargs["message"]
         second_segments = gateway.send_group_message.await_args_list[1].kwargs["message"]
-        self.assertEqual(
-            first_segments,
-            [{"type": "text", "data": {"text": "Telegram User:\ncaption"}}],
-        )
-        self.assertEqual(second_segments[0]["type"], "video")
-        self.assertIn("/media/", second_segments[0]["data"]["file"])
+        assert first_segments == [
+            {"type": "text", "data": {"text": "Telegram User:\ncaption"}}
+        ]
+        assert second_segments[0]["type"] == "video"
+        assert "/media/" in second_segments[0]["data"]["file"]
         mapping = await self.database.get_q_message(-456, 200)
-        self.assertIsNotNone(mapping)
         assert mapping is not None
-        self.assertEqual(mapping.q_message_ids, (99, 100))
+        assert mapping.q_message_ids == (99, 100)
         first_mapping = await self.database.get_tg_message(123, 99)
-        self.assertIsNotNone(first_mapping)
+        assert first_mapping is not None
 
         media_cache.close()
-        self.assertEqual(media_item_budget.used, initial_items)
+        assert media_item_budget.used == initial_items
 
     async def test_onebot_media_uses_file_as_filename_and_url_as_download_source(self) -> None:
         media, unavailable = onebot_message_media(
@@ -95,14 +97,14 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        self.assertEqual(unavailable, [])
-        self.assertEqual(media[0][1], "https://example.test/download/video?id=123")
-        self.assertEqual(media[0][2], "clip.mp4")
-        self.assertEqual(media[1][1], "https://example.test/download/image?id=456")
-        self.assertEqual(media[1][2], "image.jpg")
-        self.assertEqual(media[2][0], "file")
-        self.assertEqual(media[2][1], "https://example.test/download/file?id=789")
-        self.assertEqual(media[2][2], "archive.zip")
+        assert unavailable == []
+        assert media[0][1] == "https://example.test/download/video?id=123"
+        assert media[0][2] == "clip.mp4"
+        assert media[1][1] == "https://example.test/download/image?id=456"
+        assert media[1][2] == "image.jpg"
+        assert media[2][0] == "file"
+        assert media[2][1] == "https://example.test/download/file?id=789"
+        assert media[2][2] == "archive.zip"
 
     async def test_onebot_file_uses_send_document(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -142,10 +144,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         bot.send_document.assert_awaited_once()
-        self.assertEqual(
-            bot.send_document.await_args.kwargs["caption"],
-            "OneBot User[1]:\ncaption",
-        )
+        assert bot.send_document.await_args.kwargs["caption"] == "OneBot User[1]:\ncaption"
 
     async def test_telegram_file_keeps_text_in_same_onebot_message(self) -> None:
         content = await MediaFile.create(
@@ -169,13 +168,10 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
 
         gateway.send_group_message.assert_awaited_once()
         segments = gateway.send_group_message.await_args.kwargs["message"]
-        self.assertEqual(
-            segments[0]["data"]["text"],
-            "Telegram User:\n转发自: Original User\ncaption",
-        )
-        self.assertEqual(segments[1]["type"], "file")
-        self.assertIn("/media/", segments[1]["data"]["file"])
-        self.assertEqual(segments[1]["data"]["name"], "large-video.mp4")
+        assert segments[0]["data"]["text"] == "Telegram User:\n转发自: Original User\ncaption"
+        assert segments[1]["type"] == "file"
+        assert "/media/" in segments[1]["data"]["file"]
+        assert segments[1]["data"]["name"] == "large-video.mp4"
 
     async def test_telegram_video_retry_does_not_repeat_sent_text(self) -> None:
         video = await MediaFile.create(filename="clip.mp4", media_type="video/mp4")
@@ -195,23 +191,22 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch("src.forwarding.sql", self.database):
-            with self.assertRaises(OneBotSendError):
+            with pytest.raises(OneBotSendError):
                 await forward_telegram_to_onebot(message, cast(QGateway, gateway))
             await forward_telegram_to_onebot(message, cast(QGateway, gateway))
 
-        self.assertEqual(gateway.send_group_message.await_count, 3)
-        self.assertEqual(
-            gateway.send_group_message.await_args_list[0].kwargs["message"],
-            [{"type": "text", "data": {"text": "Telegram User:\ncaption"}}],
-        )
-        self.assertEqual(
-            gateway.send_group_message.await_args_list[1].kwargs["message"],
-            gateway.send_group_message.await_args_list[2].kwargs["message"],
+        assert gateway.send_group_message.await_count == 3
+        assert gateway.send_group_message.await_args_list[0].kwargs["message"] == [
+            {"type": "text", "data": {"text": "Telegram User:\ncaption"}}
+        ]
+        assert (
+            gateway.send_group_message.await_args_list[1].kwargs["message"]
+            == gateway.send_group_message.await_args_list[2].kwargs["message"]
         )
 
         mapping = await self.database.get_tg_message(123, 101)
         assert mapping is not None
-        self.assertEqual(mapping.q_message_ids, (101, 102))
+        assert mapping.q_message_ids == (101, 102)
 
     async def test_onebot_mp4_uses_send_video_and_saves_mapping(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -246,17 +241,13 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         bot.send_video.assert_awaited_once()
-        self.assertTrue(bot.send_video.await_args.kwargs["supports_streaming"])
-        self.assertTrue(bot.send_video.await_args.kwargs["show_caption_above_media"])
-        self.assertEqual(
-            bot.send_video.await_args.kwargs["caption"],
-            "OneBot User[1]:\ncaption",
-        )
+        assert bot.send_video.await_args.kwargs["supports_streaming"]
+        assert bot.send_video.await_args.kwargs["show_caption_above_media"]
+        assert bot.send_video.await_args.kwargs["caption"] == "OneBot User[1]:\ncaption"
         bot.send_document.assert_not_awaited()
         mapping = await self.database.get_tg_message(123, 101)
-        self.assertIsNotNone(mapping)
         assert mapping is not None
-        self.assertEqual(mapping.tg_message_ids, (201,))
+        assert mapping.tg_message_ids == (201,)
 
     async def test_onebot_video_with_existing_mapping_is_not_sent_again(self) -> None:
         await self.database.set_message_mapping(
@@ -554,11 +545,8 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         bot.send_photo.assert_awaited_once()
-        self.assertTrue(bot.send_photo.await_args.kwargs["show_caption_above_media"])
-        self.assertEqual(
-            bot.send_photo.await_args.kwargs["caption"],
-            "OneBot User[1]:\ncaption",
-        )
+        assert bot.send_photo.await_args.kwargs["show_caption_above_media"]
+        assert bot.send_photo.await_args.kwargs["caption"] == "OneBot User[1]:\ncaption"
 
     async def test_onebot_gif_image_is_sent_as_animation(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -601,9 +589,9 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         bot.send_animation.assert_awaited_once()
         bot.send_photo.assert_not_awaited()
         kwargs = bot.send_animation.await_args.kwargs
-        self.assertEqual(kwargs["animation"].filename, "animation.gif")
-        self.assertEqual(kwargs["caption"], "OneBot User[1]:\ncaption")
-        self.assertTrue(kwargs["show_caption_above_media"])
+        assert kwargs["animation"].filename == "animation.gif"
+        assert kwargs["caption"] == "OneBot User[1]:\ncaption"
+        assert kwargs["show_caption_above_media"]
 
     async def test_gif_in_image_group_disables_telegram_album(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -654,7 +642,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         bot.send_media_group.assert_not_awaited()
         bot.send_photo.assert_awaited_once()
         bot.send_animation.assert_awaited_once()
-        self.assertEqual(message.tg_message_ids, [207, 208])
+        assert message.tg_message_ids == [207, 208]
 
     async def test_onebot_multiple_images_are_sent_as_retryable_telegram_album(self) -> None:
         async def handler(request: httpx.Request) -> httpx.Response:
@@ -701,7 +689,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             with patch("src.forwarding.sql", self.database):
-                with self.assertRaisesRegex(RuntimeError, "album failed"):
+                with pytest.raises(RuntimeError, match="album failed"):
                     await forward_onebot_to_telegram(
                         message,
                         cast(ExtBot[None], bot),
@@ -713,22 +701,21 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
                     client,
                 )
 
-        self.assertEqual(bot.send_media_group.await_count, 2)
+        assert bot.send_media_group.await_count == 2
         album = bot.send_media_group.await_args.kwargs["media"]
-        self.assertEqual(len(album), 3)
-        self.assertEqual(album[0].caption, "OneBot User[1]:\n测试")
-        self.assertIsNone(album[1].caption)
-        self.assertIsNone(album[2].caption)
+        assert len(album) == 3
+        assert album[0].caption == "OneBot User[1]:\n测试"
+        assert album[1].caption is None
+        assert album[2].caption is None
         # Telegram 要求媒体组内所有项的 show_caption_above_media 一致，否则整组被拒。
-        self.assertTrue(all(item.show_caption_above_media for item in album))
+        assert all(item.show_caption_above_media for item in album)
         attach_uris = [item.media.attach_uri for item in album]
-        self.assertTrue(all(uri and uri.startswith("attach://") for uri in attach_uris))
-        self.assertEqual(len(set(attach_uris)), 3)
-        self.assertEqual(message.tg_message_ids, [301, 302, 303])
+        assert all(uri and uri.startswith("attach://") for uri in attach_uris)
+        assert len(set(attach_uris)) == 3
+        assert message.tg_message_ids == [301, 302, 303]
         mapping = await self.database.get_tg_message(123, 104)
-        self.assertIsNotNone(mapping)
         assert mapping is not None
-        self.assertEqual(mapping.tg_message_ids, (301, 302, 303))
+        assert mapping.tg_message_ids == (301, 302, 303)
 
     async def test_one_large_image_makes_whole_album_a_document_group(self) -> None:
         contents = []
@@ -782,17 +769,16 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         album = bot.send_media_group.await_args.kwargs["media"]
-        self.assertEqual([item.type for item in album], ["document"] * 3)
-        self.assertIsNone(album[0].caption)
-        self.assertIsNone(album[1].caption)
-        self.assertEqual(album[2].caption, "OneBot User[1]:\n测试")
+        assert [item.type for item in album] == ["document"] * 3
+        assert album[0].caption is None
+        assert album[1].caption is None
+        assert album[2].caption == "OneBot User[1]:\n测试"
         attach_uris = [item.media.attach_uri for item in album]
-        self.assertTrue(all(uri and uri.startswith("attach://") for uri in attach_uris))
-        self.assertEqual(len(set(attach_uris)), 3)
+        assert all(uri and uri.startswith("attach://") for uri in attach_uris)
+        assert len(set(attach_uris)) == 3
         mapping = await self.database.get_tg_message(123, 107)
-        self.assertIsNotNone(mapping)
         assert mapping is not None
-        self.assertEqual(mapping.tg_message_ids, (401, 402, 403))
+        assert mapping.tg_message_ids == (401, 402, 403)
 
     async def test_onebot_video_without_url_sends_mapped_placeholder(self) -> None:
         bot = SimpleNamespace(
@@ -821,8 +807,4 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         mapping = await self.database.get_tg_message(123, 103)
-        self.assertIsNotNone(mapping)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert mapping is not None

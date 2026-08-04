@@ -1,13 +1,15 @@
-import unittest
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from src.sql import Sql
 from src.telegraph_client import TELEGRAPH_TOKEN_KEY, TelegraphClient
 
 
-class TelegraphClientTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestTelegraphClient:
     async def test_new_account_token_is_saved_and_reused(self) -> None:
         database = SimpleNamespace(
             get_setting=AsyncMock(return_value=None),
@@ -35,15 +37,15 @@ class TelegraphClientTests(unittest.IsolatedAsyncioTestCase):
             first = await client.create_page("标题一", [])
             second = await client.create_page("标题二", [])
 
-        self.assertEqual(first, "https://telegra.ph/page")
-        self.assertEqual(second, "https://telegra.ph/page")
+        assert first == "https://telegra.ph/page"
+        assert second == "https://telegra.ph/page"
         constructor.assert_called_once_with(access_token=None)
         session_constructor.assert_called_once_with(
             proxy="socks5://proxy.example:1080",
             trust_env=False,
         )
         default_session.aclose.assert_awaited_once_with()
-        self.assertIs(api._telegraph.session, configured_session)
+        assert api._telegraph.session is configured_session
         api.create_account.assert_awaited_once_with(
             short_name="q2tg",
             author_name="q2tg",

@@ -1,10 +1,11 @@
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
+import pytest_asyncio
 from telegram import ChatMember, Update
 from telegram.ext import ContextTypes
 
@@ -13,17 +14,20 @@ from src.sql import Sql
 from src.tgbot.handlers import TGhandlers
 
 
-class UndoTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
+@pytest.mark.asyncio
+class TestUndo:
+    @pytest_asyncio.fixture(autouse=True)
+    async def setup(self):
         self.directory = TemporaryDirectory()
         self.sql = Sql(Path(self.directory.name) / "cache.sqlite3")
         await self.sql.load()
         await self.sql.bind_group(123, -456)
         self.handler = TGhandlers()
-
-    async def asyncTearDown(self) -> None:
-        await self.sql.close()
-        self.directory.cleanup()
+        try:
+            yield
+        finally:
+            await self.sql.close()
+            self.directory.cleanup()
 
     async def _undo(
         self,
@@ -74,10 +78,10 @@ class UndoTests(unittest.IsolatedAsyncioTestCase):
             original_user_id=10,
             status=ChatMember.MEMBER,
         )
-        self.assertEqual(
-            [call.args[0] for call in gateway.delete_message.await_args_list],
-            [99, 100],
-        )
+        assert [call.args[0] for call in gateway.delete_message.await_args_list] == [
+            99,
+            100,
+        ]
         bot.delete_messages.assert_awaited_once_with(chat_id=-456, message_ids=(200, 201))
         command.reply_text.assert_not_awaited()
         command.delete.assert_awaited_once()
@@ -98,7 +102,7 @@ class UndoTests(unittest.IsolatedAsyncioTestCase):
             original_user_id=10,
             status=ChatMember.ADMINISTRATOR,
         )
-        self.assertEqual(gateway.delete_message.await_count, 2)
+        assert gateway.delete_message.await_count == 2
         bot.delete_messages.assert_awaited_once()
 
     async def test_onebot_rejection_keeps_command_and_shows_error(self) -> None:
@@ -108,7 +112,7 @@ class UndoTests(unittest.IsolatedAsyncioTestCase):
             status=ChatMember.MEMBER,
             delete_error=RuntimeError("too old"),
         )
-        self.assertEqual(gateway.delete_message.await_count, 2)
+        assert gateway.delete_message.await_count == 2
         bot.delete_messages.assert_not_awaited()
         command.delete.assert_not_awaited()
         command.reply_text.assert_awaited_with(
@@ -126,7 +130,3 @@ class UndoTests(unittest.IsolatedAsyncioTestCase):
         bot.delete_messages.assert_not_awaited()
         command.delete.assert_not_awaited()
         command.reply_text.assert_awaited_once_with("OneBot 连接已断开，请稍后重试")
-
-
-if __name__ == "__main__":
-    unittest.main()

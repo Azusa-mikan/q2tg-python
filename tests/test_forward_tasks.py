@@ -1,10 +1,10 @@
 import asyncio
-import unittest
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 from telegram.error import TimedOut
 from telegram.ext import ExtBot
 
@@ -27,8 +27,11 @@ from src.messages import (
 from src.qbot import QGateway
 
 
-class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncTearDown(self) -> None:
+@pytest.mark.asyncio
+class TestForwardTasks:
+    @pytest.fixture(autouse=True)
+    def close_media_cache(self):
+        yield
         media_cache.close()
 
     async def test_finalize_releases_media_cache_pin_idempotently(self) -> None:
@@ -48,8 +51,8 @@ class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
         await finalize_telegram_message(message)
         await finalize_telegram_message(message)
 
-        self.assertFalse(message.media_cache_pinned)
-        self.assertEqual(media_cache._media[media_id].pins, 0)
+        assert not message.media_cache_pinned
+        assert media_cache._media[media_id].pins == 0
 
     async def test_telegram_target_exhaustion_only_notifies_onebot(self) -> None:
         bus = MessageBus()
@@ -81,10 +84,9 @@ class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
                     return_exceptions=True,
                 )
 
-        self.assertEqual(task.send.await_count, 3)
+        assert task.send.await_count == 3
         onebot_notice = await bus.onebot_system_queue.get()
         try:
-            self.assertIsInstance(onebot_notice, SendTask)
             assert isinstance(onebot_notice, SendTask)
             await onebot_notice.send()
         finally:
@@ -174,7 +176,7 @@ class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
         )
         error = MediaTooLargeError("OneBot 媒体超过 20 MB，无法转发")
 
-        self.assertIs(task.failure_action(error), FailureAction.DROP)
+        assert task.failure_action(error) is FailureAction.DROP
         with patch("src.forwarding.enqueue_onebot_notice") as notice:
             assert task.on_failed is not None
             await task.on_failed(error)
@@ -183,6 +185,7 @@ class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
             gateway,
             q_group_id=123,
             text="OneBot 媒体超过 20 MB，无法转发",
+            label="onebot-media-rejected:123:1",
         )
 
     async def test_telegram_timeout_is_not_retried_and_reports_unknown_result(self) -> None:
@@ -220,9 +223,5 @@ class ForwardTaskTests(unittest.IsolatedAsyncioTestCase):
         finally:
             bus.onebot_system_queue.task_done()
         text = gateway.send_group_message.await_args.kwargs["message"][0]["data"]["text"]
-        self.assertIn("发送结果未知", text)
-        self.assertIn("未自动重试", text)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert "发送结果未知" in text
+        assert "未自动重试" in text

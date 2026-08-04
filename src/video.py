@@ -15,6 +15,7 @@ from src.media import (
     start_media_process,
     transcode_target,
 )
+from src.runtime_events import emit_runtime_event
 
 PROBE_TIMEOUT = 30
 TRANSCODE_TIMEOUT = 300
@@ -30,6 +31,7 @@ async def normalize_video_for_onebot(media: MediaFile, *, size_limit: int) -> No
     """
     video_codec, audio_codecs = await _probe_codecs(media)
     if video_codec == "h264" and all(codec == "aac" for codec in audio_codecs):
+        emit_runtime_event("capability.succeeded", "telegram.video.compatible")
         return
 
     started_at = time.monotonic()
@@ -80,6 +82,7 @@ async def normalize_video_for_onebot(media: MediaFile, *, size_limit: int) -> No
             suffix=".mp4",
             media_type="video/mp4",
         )
+        emit_runtime_event("capability.succeeded", "telegram.video.transcoded")
         baselog.info("视频转码完成，耗时 %.2f 秒", time.monotonic() - started_at)
 
 

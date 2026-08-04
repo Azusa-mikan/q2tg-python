@@ -1,16 +1,18 @@
 import asyncio
 import json
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import pytest
+
 from src.media import MediaFile, media_item_budget
 from src.video import normalize_video_for_onebot
 
 
-class VideoNormalizationTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestVideoNormalization:
     async def _generate_video(self, codec: str) -> bytes:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "sample.mp4"
@@ -34,7 +36,7 @@ class VideoNormalizationTests(unittest.IsolatedAsyncioTestCase):
                 stderr=asyncio.subprocess.PIPE,
             )
             _, stderr = await process.communicate()
-            self.assertEqual(process.returncode, 0, stderr.decode(errors="replace"))
+            assert process.returncode == 0, stderr.decode(errors="replace")
             return path.read_bytes()
 
     async def _codec(self, media: MediaFile) -> str:
@@ -56,7 +58,7 @@ class VideoNormalizationTests(unittest.IsolatedAsyncioTestCase):
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await process.communicate()
-        self.assertEqual(process.returncode, 0, stderr.decode(errors="replace"))
+        assert process.returncode == 0, stderr.decode(errors="replace")
         return json.loads(stdout)["streams"][0]["codec_name"]
 
     async def test_h264_mp4_is_kept_without_transcoding(self) -> None:
@@ -68,12 +70,12 @@ class VideoNormalizationTests(unittest.IsolatedAsyncioTestCase):
         try:
             with patch("src.video.baselog.info") as info:
                 await normalize_video_for_onebot(media, size_limit=20_000_000)
-            self.assertEqual(media.size, len(original))
-            self.assertEqual(media.file.read(), original)
+            assert media.size == len(original)
+            assert media.file.read() == original
             info.assert_not_called()
         finally:
             media.close()
-        self.assertEqual(media_item_budget.used, initial_items)
+        assert media_item_budget.used == initial_items
 
     async def test_hevc_mp4_is_transcoded_to_h264(self) -> None:
         initial_items = media_item_budget.used
@@ -81,7 +83,7 @@ class VideoNormalizationTests(unittest.IsolatedAsyncioTestCase):
         media.write(await self._generate_video("libx265"))
         media.rewind()
         try:
-            self.assertEqual(await self._codec(media), "hevc")
+            assert await self._codec(media) == "hevc"
             with (
                 patch(
                     "src.video.time",
@@ -90,14 +92,10 @@ class VideoNormalizationTests(unittest.IsolatedAsyncioTestCase):
                 patch("src.video.baselog.info") as info,
             ):
                 await normalize_video_for_onebot(media, size_limit=20_000_000)
-            self.assertEqual(await self._codec(media), "h264")
-            self.assertEqual(media.media_type, "video/mp4")
-            self.assertEqual(media.filename, "sample.mp4")
+            assert await self._codec(media) == "h264"
+            assert media.media_type == "video/mp4"
+            assert media.filename == "sample.mp4"
             info.assert_called_once_with("视频转码完成，耗时 %.2f 秒", 2.3450000000000006)
         finally:
             media.close()
-        self.assertEqual(media_item_budget.used, initial_items)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert media_item_budget.used == initial_items

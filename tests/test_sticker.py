@@ -1,19 +1,20 @@
 import asyncio
 import gzip
 import io
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import pytest
 from PIL import Image
 
 from src.media import MediaFile, media_item_budget
 from src.sticker import static_sticker_to_png, tgs_sticker_to_gif, video_sticker_to_gif
 
 
-class StickerConversionTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestStickerConversion:
     async def test_static_webp_is_converted_to_rgba_png(self) -> None:
         initial_items = media_item_budget.used
         source = io.BytesIO()
@@ -29,17 +30,17 @@ class StickerConversionTests(unittest.IsolatedAsyncioTestCase):
                 patch("src.sticker.baselog.info") as info,
             ):
                 await static_sticker_to_png(media, size_limit=20_000_000)
-            self.assertEqual(media.filename, "sticker.png")
-            self.assertEqual(media.media_type, "image/png")
-            self.assertEqual(media.file.read(8), b"\x89PNG\r\n\x1a\n")
+            assert media.filename == "sticker.png"
+            assert media.media_type == "image/png"
+            assert media.file.read(8) == b"\x89PNG\r\n\x1a\n"
             media.rewind()
             with Image.open(media.file) as converted:
-                self.assertEqual(converted.mode, "RGBA")
-                self.assertEqual(converted.size, (16, 16))
+                assert converted.mode == "RGBA"
+                assert converted.size == (16, 16)
             info.assert_called_once_with("静态贴纸转换完成，耗时 %.2f 秒", 0.5)
         finally:
             media.close()
-        self.assertEqual(media_item_budget.used, initial_items)
+        assert media_item_budget.used == initial_items
 
     async def test_video_webm_sticker_is_converted_to_gif(self) -> None:
         initial_items = media_item_budget.used
@@ -68,7 +69,7 @@ class StickerConversionTests(unittest.IsolatedAsyncioTestCase):
                 stderr=asyncio.subprocess.PIPE,
             )
             _, stderr = await process.communicate()
-            self.assertEqual(process.returncode, 0, stderr.decode(errors="replace"))
+            assert process.returncode == 0, stderr.decode(errors="replace")
             source = path.read_bytes()
 
         media = await MediaFile.create(filename="sticker.webm", media_type="video/webm")
@@ -82,20 +83,20 @@ class StickerConversionTests(unittest.IsolatedAsyncioTestCase):
                 patch("src.sticker.baselog.info") as info,
             ):
                 await video_sticker_to_gif(media, size_limit=20_000_000)
-            self.assertEqual(media.filename, "sticker.gif")
-            self.assertEqual(media.media_type, "image/gif")
-            self.assertIn(media.file.read(6), {b"GIF87a", b"GIF89a"})
+            assert media.filename == "sticker.gif"
+            assert media.media_type == "image/gif"
+            assert media.file.read(6) in {b"GIF87a", b"GIF89a"}
             media.rewind()
             with Image.open(media.file) as converted:
-                self.assertEqual(converted.format, "GIF")
+                assert converted.format == "GIF"
                 rgba = converted.convert("RGBA")
                 alpha = rgba.getchannel("A")
-                self.assertEqual(alpha.getpixel((0, 0)), 0)
-                self.assertEqual(alpha.getpixel((256, 256)), 255)
+                assert alpha.getpixel((0, 0)) == 0
+                assert alpha.getpixel((256, 256)) == 255
             info.assert_called_once_with("视频贴纸转码完成，耗时 %.2f 秒", 1.25)
         finally:
             media.close()
-        self.assertEqual(media_item_budget.used, initial_items)
+        assert media_item_budget.used == initial_items
 
     async def test_tgs_sticker_uses_bundled_converter_in_project_container(self) -> None:
         initial_items = media_item_budget.used
@@ -129,16 +130,16 @@ class StickerConversionTests(unittest.IsolatedAsyncioTestCase):
                 patch("src.sticker.baselog.info") as info,
             ):
                 await tgs_sticker_to_gif(media)
-            self.assertEqual(media.filename, "sticker.gif")
-            self.assertEqual(media.media_type, "image/gif")
-            self.assertEqual(media.file.read(6), b"GIF89a")
-            self.assertEqual(commands[0][:2], ("bash", "/usr/local/bin/lottie_to_gif.sh"))
-            self.assertIn("--fps", commands[0])
-            self.assertEqual(len(commands), 1)
+            assert media.filename == "sticker.gif"
+            assert media.media_type == "image/gif"
+            assert media.file.read(6) == b"GIF89a"
+            assert commands[0][:2] == ("bash", "/usr/local/bin/lottie_to_gif.sh")
+            assert "--fps" in commands[0]
+            assert len(commands) == 1
             info.assert_called_once_with("TGS 贴纸转码完成，耗时 %.2f 秒", 1.5)
         finally:
             media.close()
-        self.assertEqual(media_item_budget.used, initial_items)
+        assert media_item_budget.used == initial_items
 
     async def test_tgs_sticker_uses_docker_outside_project_container(self) -> None:
         initial_items = media_item_budget.used
@@ -171,15 +172,11 @@ class StickerConversionTests(unittest.IsolatedAsyncioTestCase):
                 patch("src.sticker.os.getgid", return_value=1001),
             ):
                 await tgs_sticker_to_gif(media)
-            self.assertEqual(commands[0][:2], ("docker", "info"))
-            self.assertEqual(commands[1][:3], ("docker", "run", "--rm"))
-            self.assertIn("1000:1001", commands[1])
-            self.assertIn("edasriyan/lottie-to-gif@sha256:", " ".join(commands[1]))
-            self.assertEqual(media.file.read(6), b"GIF89a")
+            assert commands[0][:2] == ("docker", "info")
+            assert commands[1][:3] == ("docker", "run", "--rm")
+            assert "1000:1001" in commands[1]
+            assert "edasriyan/lottie-to-gif@sha256:" in " ".join(commands[1])
+            assert media.file.read(6) == b"GIF89a"
         finally:
             media.close()
-        self.assertEqual(media_item_budget.used, initial_items)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert media_item_budget.used == initial_items

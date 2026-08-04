@@ -20,6 +20,7 @@ from src.media import (
     transcode_target,
 )
 from src.messages import MediaTooLargeError
+from src.runtime_events import emit_runtime_event
 
 SILK_SAMPLE_RATE = 24000
 RECORD_SIZE_LIMIT = MEDIA_SIZE_LIMIT
@@ -65,6 +66,7 @@ async def normalize_onebot_record(media: MediaFile) -> None:
                 media.filename = f"{Path(media.filename).stem or 'voice'}.ogg"
                 media.media_type = "audio/ogg"
                 media.rewind()
+                emit_runtime_event("capability.succeeded", "onebot.voice.compatible")
                 return
             input_fd = media.file.fileno()
             media.rewind()
@@ -80,6 +82,7 @@ async def normalize_onebot_record(media: MediaFile) -> None:
         if output_size == 0 or not _is_ogg_file(output_path):
             raise ValueError("OneBot 语音转码未生成有效的 Ogg 文件")
         finalize_media(media, output_path, stem_fallback="voice", suffix=".ogg", media_type="audio/ogg")
+        emit_runtime_event("capability.succeeded", "onebot.voice.transcoded")
         baselog.info("OneBot 语音规范化完成，耗时 %.2f 秒", time.monotonic() - started_at)
 
 

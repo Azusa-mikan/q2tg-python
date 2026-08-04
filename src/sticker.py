@@ -22,6 +22,7 @@ from src.media import (
     transcode_target,
 )
 from src.paths import ensure_temp_dir
+from src.runtime_events import emit_runtime_event
 
 STICKER_TRANSCODE_TIMEOUT = 120
 TGS_JSON_SIZE_LIMIT = 5_000_000
@@ -50,6 +51,7 @@ async def static_sticker_to_png(media: MediaFile, *, size_limit: int) -> None:
             suffix=".png",
             media_type="image/png",
         )
+        emit_runtime_event("capability.succeeded", "telegram.sticker.static")
         baselog.info("静态贴纸转换完成，耗时 %.2f 秒", time.monotonic() - started_at)
 
 
@@ -97,6 +99,7 @@ async def video_sticker_to_gif(media: MediaFile, *, size_limit: int) -> None:
             suffix=".gif",
             media_type="image/gif",
         )
+        emit_runtime_event("capability.succeeded", "telegram.sticker.video")
         baselog.info("视频贴纸转码完成，耗时 %.2f 秒", time.monotonic() - started_at)
 
 
@@ -160,6 +163,7 @@ async def tgs_sticker_to_gif(media: MediaFile) -> None:
             suffix=".gif",
             media_type="image/gif",
         )
+        emit_runtime_event("capability.succeeded", "telegram.sticker.tgs")
         baselog.info("TGS 贴纸转码完成，耗时 %.2f 秒", time.monotonic() - started_at)
 
 

@@ -67,6 +67,7 @@ from src.messages import (
 from src.notice import enqueue_bridge_notice
 from src.processing import media_processor
 from src.qbot import q_gateway
+from src.runtime_events import emit_runtime_event
 from src.runtime_stats import get_runtime_info
 from src.sql import sql
 
@@ -173,6 +174,17 @@ def is_anonymous_sender(msg: Message) -> bool:
     GroupAnonymousBot（is_bot 为真），但本质是群成员而非其他 Bot。"""
     sender_chat = getattr(msg, "sender_chat", None)
     return sender_chat is not None and sender_chat.id == msg.chat_id
+
+
+def telegram_media_kind(msg: Message) -> str:
+    """返回真实测试日志使用的粗粒度 Telegram 媒体类型。"""
+    if msg.video is not None:
+        return "video"
+    if getattr(msg, "voice", None) is not None:
+        return "record"
+    if msg.photo:
+        return "image"
+    return "file"
 
 
 class TGhandlers:
@@ -760,6 +772,7 @@ class TGhandlers:
                 message_ids=mapping.tg_message_ids[index : index + TELEGRAM_DELETE_BATCH],
             )
         await msg.delete()
+        emit_runtime_event("command.succeeded", "telegram-undo")
 
     async def unpin(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """取消被回复消息在 Telegram 的置顶和 OneBot 的精华状态。"""
@@ -795,6 +808,7 @@ class TGhandlers:
                 message_id=message_id,
             )
         await msg.delete()
+        emit_runtime_event("command.succeeded", "telegram-unpin")
 
     @staticmethod
     async def _run_onebot_message_actions(
@@ -971,6 +985,11 @@ class TGhandlers:
                 await self._enqueue_media([msg], context.bot.id)
             except ValueError as error:
                 await msg.reply_text(str(error))
+                emit_runtime_event(
+                    "inbound.rejected",
+                    f"telegram-media:{telegram_media_kind(msg)}",
+                    error=error,
+                )
             return
 
         album = self._albums.setdefault(msg.media_group_id, [])
@@ -994,6 +1013,11 @@ class TGhandlers:
                     await self._enqueue_media(messages, messages[0].get_bot().id)
                 except ValueError as error:
                     await messages[0].reply_text(str(error))
+                    emit_runtime_event(
+                        "inbound.rejected",
+                        "telegram-media-group",
+                        error=error,
+                    )
         finally:
             # 取消可能发生在聚合窗口内，此时还没有 pop 相册消息。
             self._albums.pop(media_group_id, None)
@@ -1059,6 +1083,22 @@ class TGhandlers:
                 sources.append(("file", audio, TELEGRAM_DOWNLOAD_LIMIT, "none"))
             elif (document := message.document) is not None:
                 sources.append(("file", document, TELEGRAM_DOWNLOAD_LIMIT, "none"))
+
+        work_id = f"telegram-to-onebot:{first.chat_id}:{tuple(message.message_id for message in messages)}"
+        for kind, _, _, processing in sources:
+            capability = {
+                "sticker_static": "telegram.sticker.static.input",
+                "sticker_video": "telegram.sticker.video.input",
+                "sticker_tgs": "telegram.sticker.tgs.input",
+                "video": "telegram.media.video",
+            }.get(processing, f"telegram.media.{kind}")
+            emit_runtime_event("capability.succeeded", capability, work_id=work_id)
+        if len(sources) == TELEGRAM_ALBUM_LIMIT:
+            emit_runtime_event(
+                "capability.succeeded",
+                "telegram.media-group.limit",
+                work_id=work_id,
+            )
 
         declared_size = sum(source.file_size or limit for _, source, limit, _ in sources)
         if any(
@@ -1142,6 +1182,12 @@ class TGhandlers:
             total_size = sum(attachment.content.size for attachment in media)
             if total_size > TELEGRAM_ALBUM_BYTES_LIMIT:
                 raise ValueError("Telegram 媒体组超过 100 MB 上限")
+            if 90_000_000 <= total_size <= TELEGRAM_ALBUM_BYTES_LIMIT:
+                emit_runtime_event(
+                    "capability.succeeded",
+                    "telegram.media-group.bytes-boundary",
+                    work_id=work_id,
+                )
             needs_processing = any(
                 attachment.processing != "none" for attachment in media
             )

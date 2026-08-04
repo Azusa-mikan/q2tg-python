@@ -49,5 +49,11 @@ dev = [
     # Python 静态类型检查。
     "pyright>=1.1.411",
     # Python lint 与代码规范检查。
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
     "ruff>=0.16.1",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

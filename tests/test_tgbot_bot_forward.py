@@ -1,9 +1,9 @@
-import unittest
 from functools import partial
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from telegram import Message, Update
 from telegram.ext import ContextTypes
 
@@ -12,7 +12,8 @@ from src.messages import SendTask
 from src.tgbot.handlers import TGhandlers
 
 
-class TelegramBotForwardTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestTelegramBotForward:
     async def test_other_bot_text_requires_bot_forward_switch(self) -> None:
         handler = TGhandlers()
         bus = MessageBus()
@@ -48,16 +49,14 @@ class TelegramBotForwardTests(unittest.IsolatedAsyncioTestCase):
             patch("src.tgbot.handlers.message_bus", bus),
         ):
             await handler.receive_message(update, context)
-            self.assertTrue(bus.onebot_queue.empty())
+            assert bus.onebot_queue.empty()
 
             await handler.receive_message(update, context)
-            self.assertEqual(bus.onebot_queue.qsize(), 1)
+            assert bus.onebot_queue.qsize() == 1
             task = await bus.onebot_queue.get()
-            self.assertIsInstance(task, SendTask)
             assert isinstance(task, SendTask)
-            self.assertIsInstance(task.send, partial)
             assert isinstance(task.send, partial)
-            self.assertTrue(task.send.args[0].bot_forward_required)
+            assert task.send.args[0].bot_forward_required
             bus.onebot_queue.task_done()
 
     async def test_current_bot_message_is_never_forwarded(self) -> None:
@@ -74,7 +73,7 @@ class TelegramBotForwardTests(unittest.IsolatedAsyncioTestCase):
             "src.tgbot.handlers.sql.get_bot_forward_enabled",
             new_callable=AsyncMock,
         ) as get_enabled:
-            self.assertFalse(await handler._can_forward_sender(message, 700004))
+            assert not await handler._can_forward_sender(message, 700004)
 
         get_enabled.assert_not_awaited()
 
@@ -113,16 +112,14 @@ class TelegramBotForwardTests(unittest.IsolatedAsyncioTestCase):
             patch("src.tgbot.handlers.message_bus", bus),
         ):
             await handler.receive_command(update, context)
-            self.assertTrue(bus.onebot_queue.empty())
+            assert bus.onebot_queue.empty()
 
             await handler.receive_command(update, context)
-            self.assertEqual(bus.onebot_queue.qsize(), 1)
+            assert bus.onebot_queue.qsize() == 1
             task = await bus.onebot_queue.get()
-            self.assertIsInstance(task, SendTask)
             assert isinstance(task, SendTask)
-            self.assertIsInstance(task.send, partial)
             assert isinstance(task.send, partial)
-            self.assertTrue(task.send.args[0].bot_forward_required)
+            assert task.send.args[0].bot_forward_required
             bus.onebot_queue.task_done()
 
     async def test_other_bot_media_requires_bot_forward_switch(self) -> None:
@@ -196,16 +193,12 @@ class TelegramBotForwardTests(unittest.IsolatedAsyncioTestCase):
         ):
             await handler.receive_message(update, context)
 
-        self.assertEqual(bus.onebot_queue.qsize(), 1)
+        assert bus.onebot_queue.qsize() == 1
         task = await bus.onebot_queue.get()
         assert isinstance(task, SendTask)
         assert isinstance(task.send, partial)
         forwarded = task.send.args[0]
-        self.assertEqual(forwarded.sender_name, "Group")
-        self.assertFalse(forwarded.bot_forward_required)
+        assert forwarded.sender_name == "Group"
+        assert not forwarded.bot_forward_required
         bus.onebot_queue.task_done()
         get_bot_forward.assert_not_awaited()
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -1,5 +1,4 @@
 import asyncio
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -7,6 +6,8 @@ from typing import cast
 from unittest.mock import AsyncMock, call, patch
 
 import httpx
+import pytest
+import pytest_asyncio
 from fastapi import WebSocket
 from telegram import Update
 from telegram.ext import ContextTypes, ExtBot
@@ -18,7 +19,8 @@ from src.sql import Sql
 from src.tgbot.handlers import TGhandlers
 
 
-class EssenceGatewayTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestEssenceGateway:
     async def test_essence_methods_use_expected_actions(self) -> None:
         websocket = SimpleNamespace(send_json=AsyncMock())
         gateway = QGateway()
@@ -41,13 +43,15 @@ class EssenceGatewayTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
             await task
-            self.assertEqual(request["action"], action)
-            self.assertEqual(request["params"], {"message_id": -1_001})
+            assert request["action"] == action
+            assert request["params"] == {"message_id": -1_001}
             websocket.send_json.reset_mock()
 
 
-class EssenceBridgeTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
+@pytest.mark.asyncio
+class TestEssenceBridge:
+    @pytest_asyncio.fixture(autouse=True)
+    async def setup_bridge(self):
         self.directory = TemporaryDirectory()
         self.sql = Sql(Path(self.directory.name) / "essence.sqlite3")
         await self.sql.load()
@@ -69,10 +73,11 @@ class EssenceBridgeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.client = cast(httpx.AsyncClient, SimpleNamespace())
-
-    async def asyncTearDown(self) -> None:
-        await self.sql.close()
-        self.directory.cleanup()
+        try:
+            yield
+        finally:
+            await self.sql.close()
+            self.directory.cleanup()
 
     async def test_onebot_add_and_delete_essence_update_all_telegram_messages(
         self,
@@ -92,16 +97,15 @@ class EssenceBridgeTests(unittest.IsolatedAsyncioTestCase):
                 )
             task = await self.bus.telegram_event_queue.get()
             try:
-                self.assertIsInstance(task, SendTask)
                 assert isinstance(task, SendTask)
-                self.assertIs(task.target, SendTarget.TELEGRAM)
-                self.assertIs(task.lane, SendLane.EVENT)
+                assert task.target is SendTarget.TELEGRAM
+                assert task.lane is SendLane.EVENT
                 with patch("src.forwarding.sql", self.sql):
                     await task.send()
             finally:
                 self.bus.telegram_event_queue.task_done()
 
-        self.assertEqual(self.pin_chat_message.await_count, 2)
+        assert self.pin_chat_message.await_count == 2
         self.pin_chat_message.assert_any_await(
             chat_id=-100_123,
             message_id=201,
@@ -112,7 +116,7 @@ class EssenceBridgeTests(unittest.IsolatedAsyncioTestCase):
             message_id=202,
             disable_notification=True,
         )
-        self.assertEqual(self.unpin_chat_message.await_count, 2)
+        assert self.unpin_chat_message.await_count == 2
         self.unpin_chat_message.assert_any_await(
             chat_id=-100_123,
             message_id=201,
@@ -139,7 +143,7 @@ class EssenceBridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.client,
             )
 
-        self.assertTrue(self.bus.telegram_event_queue.empty())
+        assert self.bus.telegram_event_queue.empty()
         warning.assert_called_once()
 
     async def test_telegram_pin_sets_all_mapped_onebot_messages(self) -> None:
@@ -164,17 +168,14 @@ class EssenceBridgeTests(unittest.IsolatedAsyncioTestCase):
         task = await self.bus.onebot_event_queue.get()
         try:
             assert isinstance(task, SendTask)
-            self.assertIs(task.target, SendTarget.ONEBOT)
-            self.assertIs(task.lane, SendLane.EVENT)
+            assert task.target is SendTarget.ONEBOT
+            assert task.lane is SendLane.EVENT
             with patch("src.forwarding.sql", self.sql):
                 await task.send()
         finally:
             self.bus.onebot_event_queue.task_done()
 
-        self.assertEqual(
-            gateway.set_essence_message.await_args_list,
-            [call(-1_001), call(-1_002)],
-        )
+        assert gateway.set_essence_message.await_args_list == [call(-1_001), call(-1_002)]
 
     async def test_bot_generated_pin_service_message_is_ignored(self) -> None:
         handler = TGhandlers()
@@ -196,8 +197,4 @@ class EssenceBridgeTests(unittest.IsolatedAsyncioTestCase):
         with patch("src.tgbot.handlers.message_bus", self.bus):
             await handler.receive_pinned_message(update, context)
 
-        self.assertTrue(self.bus.onebot_event_queue.empty())
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert self.bus.onebot_event_queue.empty()

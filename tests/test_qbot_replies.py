@@ -1,11 +1,11 @@
 import asyncio
-import unittest
 from functools import partial
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 from telegram.ext import ExtBot
 
 from src.bus import MessageBus
@@ -14,8 +14,10 @@ from src.messages import OneBotMessage, SendTarget, SendTask
 from src.qbot import q_gateway, receive_onebot_event
 
 
-class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+@pytest.mark.asyncio
+class TestOneBotReply:
+    @pytest.fixture(autouse=True)
+    def setup_bus(self) -> None:
         self.bus = MessageBus()
         self.bot = cast(ExtBot[None], SimpleNamespace())
         self.client = cast(httpx.AsyncClient, SimpleNamespace())
@@ -25,13 +27,10 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
             await receive_onebot_event(event, self.bot, self.client)
         task = await asyncio.wait_for(self.bus.telegram_queue.get(), timeout=1)
         try:
-            self.assertIsInstance(task, SendTask)
             assert isinstance(task, SendTask)
-            self.assertIs(task.target, SendTarget.TELEGRAM)
-            self.assertIsInstance(task.send, partial)
+            assert task.target is SendTarget.TELEGRAM
             assert isinstance(task.send, partial)
             message = task.send.args[0]
-            self.assertIsInstance(message, OneBotMessage)
             assert isinstance(message, OneBotMessage)
             abandon_onebot_forward(message.group_id, message.message_id)
             return message
@@ -54,7 +53,7 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
                 ],
             }
         )
-        self.assertEqual(message.reply_message_id, 123)
+        assert message.reply_message_id == 123
 
     async def test_group_card_is_preferred_over_nickname(self) -> None:
         message = await self._receive(
@@ -70,7 +69,7 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
                 "message": [{"type": "text", "data": {"text": "message"}}],
             }
         )
-        self.assertEqual(message.sender_name, "Group Card")
+        assert message.sender_name == "Group Card"
 
     async def test_anonymous_name_is_used_instead_of_sender(self) -> None:
         message = await self._receive(
@@ -87,8 +86,8 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
                 "message": [{"type": "text", "data": {"text": "message"}}],
             }
         )
-        self.assertEqual(message.sender_name, "Anonymous")
-        self.assertFalse(message.sender_name_is_fallback)
+        assert message.sender_name == "Anonymous"
+        assert not message.sender_name_is_fallback
 
     async def test_missing_sender_name_is_marked_as_id_fallback(self) -> None:
         message = await self._receive(
@@ -104,8 +103,8 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
                 "message": [{"type": "text", "data": {"text": "message"}}],
             }
         )
-        self.assertEqual(message.sender_name, "OneBot 用户[234]")
-        self.assertTrue(message.sender_name_is_fallback)
+        assert message.sender_name == "OneBot 用户[234]"
+        assert message.sender_name_is_fallback
 
     async def test_notice_subtype_is_not_queued(self) -> None:
         with patch("src.qbot.message_bus", self.bus):
@@ -118,7 +117,7 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
                 self.bot,
                 self.client,
             )
-        self.assertTrue(self.bus.telegram_queue.empty())
+        assert self.bus.telegram_queue.empty()
 
     async def test_null_segment_data_is_normalized(self) -> None:
         message = await self._receive(
@@ -133,7 +132,7 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
                 "message": [{"type": "rps", "data": None}],
             }
         )
-        self.assertEqual(message.message, [{"type": "rps", "data": {}}])
+        assert message.message == [{"type": "rps", "data": {}}]
 
     async def test_malformed_segment_is_rejected(self) -> None:
         with (
@@ -154,7 +153,7 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
                 self.bot,
                 self.client,
             )
-        self.assertTrue(self.bus.telegram_queue.empty())
+        assert self.bus.telegram_queue.empty()
         warning.assert_called_once()
 
     async def test_full_telegram_queue_does_not_block_onebot_reader(self) -> None:
@@ -180,7 +179,7 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
                 self.bot,
                 self.client,
             )
-        self.assertEqual(bus.telegram_queue.qsize(), 1)
+        assert bus.telegram_queue.qsize() == 1
         error.assert_called_once()
         notice.assert_called_once_with(
             q_gateway,
@@ -214,10 +213,6 @@ class OneBotReplyTests(unittest.IsolatedAsyncioTestCase):
             await receive_onebot_event(event, self.bot, self.client)
             await receive_onebot_event(event, self.bot, self.client)
 
-        self.assertEqual(self.bus.telegram_queue.qsize(), 1)
+        assert self.bus.telegram_queue.qsize() == 1
         warning.assert_called_once()
         abandon_onebot_forward(30, -40)
-
-
-if __name__ == "__main__":
-    unittest.main()

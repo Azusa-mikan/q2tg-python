@@ -1,8 +1,9 @@
-import unittest
+import re
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from telegram import Message, MessageEntity, Update
 from telegram.ext import ContextTypes, InlineQueryHandler
 
@@ -15,7 +16,8 @@ from src.tgbot.handlers import (
 )
 
 
-class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
+class TestTelegramInlineAt:
+    @pytest.mark.asyncio
     async def test_at_creates_user_bound_group_context(self) -> None:
         handler = TGhandlers()
         message = SimpleNamespace(reply_text=AsyncMock())
@@ -39,16 +41,17 @@ class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
         text = message.reply_text.await_args.args[0]
         markup = message.reply_text.await_args.kwargs["reply_markup"]
         button = markup.inline_keyboard[0][0]
-        self.assertEqual(text, "请选择需要 @ 的 OneBot 群成员")
-        self.assertEqual(button.text, "选择群成员")
-        self.assertTrue(button.switch_inline_query_current_chat.startswith("at "))
-        self.assertTrue(button.switch_inline_query_current_chat.endswith(" "))
+        assert text == "请选择需要 @ 的 OneBot 群成员"
+        assert button.text == "选择群成员"
+        assert button.switch_inline_query_current_chat.startswith("at ")
+        assert button.switch_inline_query_current_chat.endswith(" ")
         token = button.switch_inline_query_current_chat.removeprefix("at ").strip()
         inline_context = handler._inline_at_contexts[token]
-        self.assertEqual(inline_context.user_id, 820_002)
-        self.assertEqual(inline_context.tg_chat_id, -820_001)
-        self.assertEqual(inline_context.q_group_id, 820_003)
+        assert inline_context.user_id == 820_002
+        assert inline_context.tg_chat_id == -820_001
+        assert inline_context.q_group_id == 820_003
 
+    @pytest.mark.asyncio
     async def test_inline_at_searches_members_and_reuses_snapshot(self) -> None:
         handler = TGhandlers()
         handler._inline_at_contexts["example-token"] = InlineAtContext(
@@ -102,30 +105,28 @@ class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         gateway.get_group_member_list.assert_awaited_once_with(830_003)
-        self.assertEqual(answer.await_count, 3)
+        assert answer.await_count == 3
         await_args = answer.await_args
         assert await_args is not None
         results = await_args.args[0]
-        self.assertEqual(len(results), 1)
-        self.assertEqual(results[0].title, "Sample Card[830004]")
-        self.assertEqual(
-            results[0].input_message_content.message_text,
-            "@\u2063Sample Card[830004]",
-        )
+        assert len(results) == 1
+        assert results[0].title == "Sample Card[830004]"
+        assert results[0].input_message_content.message_text == "@\u2063Sample Card[830004]"
         entity = results[0].input_message_content.entities[0]
-        self.assertEqual(entity.type, MessageEntity.TEXT_LINK)
-        self.assertEqual(entity.offset, 1)
-        self.assertEqual(entity.length, 1)
-        self.assertRegex(entity.url or "", r"^https://q2tg\.invalid/token/[A-Za-z0-9_-]{32}$")
-        self.assertNotIn("830004", entity.url or "")
+        assert entity.type == MessageEntity.TEXT_LINK
+        assert entity.offset == 1
+        assert entity.length == 1
+        assert re.search(r"^https://q2tg\.invalid/token/[A-Za-z0-9_-]{32}$", entity.url or "")
+        assert "830004" not in (entity.url or "")
         urls = [
             call.args[0][0].input_message_content.entities[0].url
             for call in answer.await_args_list
         ]
-        self.assertEqual(len(set(urls)), 1)
-        self.assertEqual(await_args.kwargs["cache_time"], 0)
-        self.assertTrue(await_args.kwargs["is_personal"])
+        assert len(set(urls)) == 1
+        assert await_args.kwargs["cache_time"] == 0
+        assert await_args.kwargs["is_personal"]
 
+    @pytest.mark.asyncio
     async def test_inline_at_rejects_other_user_and_expired_token(self) -> None:
         handler = TGhandlers()
         handler._inline_at_contexts["example-token"] = InlineAtContext(
@@ -161,13 +162,12 @@ class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
         gateway.get_group_member_list.assert_not_awaited()
 
     def test_inline_query_handler_is_registered(self) -> None:
-        self.assertTrue(
-            any(
-                isinstance(handler, InlineQueryHandler)
-                for handler in TGhandlers().get_handlers()
-            )
+        assert any(
+            isinstance(handler, InlineQueryHandler)
+            for handler in TGhandlers().get_handlers()
         )
 
+    @pytest.mark.asyncio
     async def test_inline_result_entity_restores_onebot_user_id(self) -> None:
         handler = TGhandlers()
         inline_context = InlineAtContext(
@@ -213,11 +213,9 @@ class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
                 return_value=850_005,
             ),
         ):
-            self.assertEqual(
-                await handler._inline_at_user_id(message, 850_001),
-                850_002,
-            )
+            assert await handler._inline_at_user_id(message, 850_001) == 850_002
 
+    @pytest.mark.asyncio
     async def test_inline_selection_survives_snapshot_eviction(self) -> None:
         handler = TGhandlers()
         inline_context = InlineAtContext(
@@ -259,11 +257,9 @@ class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
                 return_value=851_003,
             ),
         ):
-            self.assertEqual(
-                await handler._inline_at_user_id(message, 851_005),
-                851_004,
-            )
+            assert await handler._inline_at_user_id(message, 851_005) == 851_004
 
+    @pytest.mark.asyncio
     async def test_inline_result_rejects_malformed_user_id(self) -> None:
         text = "@\u2063Example Member"
         message = cast(
@@ -284,9 +280,26 @@ class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
-        self.assertIsNone(await TGhandlers()._inline_at_user_id(message, 875_003))
+        assert await TGhandlers()._inline_at_user_id(message, 875_003) is None
 
-    async def test_inline_result_rejects_invalid_selection_context(self) -> None:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("user_id", "chat_id", "url_template"),
+        [
+            (879_006, -879_002, "https://q2tg.invalid/token/{token}"),
+            (879_001, -879_007, "https://q2tg.invalid/token/{token}"),
+            (879_001, -879_002, "https://q2tg.invalid/token/{token}?extra=value"),
+            (879_001, -879_002, "https://q2tg.invalid/token/{token}#fragment"),
+            (879_001, -879_002, "https://example.invalid/token/{token}"),
+        ],
+        ids=["other-user", "other-chat", "query", "fragment", "other-host"],
+    )
+    async def test_inline_result_rejects_invalid_selection_context(
+        self,
+        user_id: int,
+        chat_id: int,
+        url_template: str,
+    ) -> None:
         handler = TGhandlers()
         inline_context = InlineAtContext(
             user_id=879_001,
@@ -325,32 +338,10 @@ class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-        cases = (
-            message(
-                user_id=879_006,
-                chat_id=-879_002,
-                url=f"https://q2tg.invalid/token/{token}",
-            ),
-            message(
-                user_id=879_001,
-                chat_id=-879_007,
-                url=f"https://q2tg.invalid/token/{token}",
-            ),
-            message(
-                user_id=879_001,
-                chat_id=-879_002,
-                url=f"https://q2tg.invalid/token/{token}?extra=value",
-            ),
-            message(
-                user_id=879_001,
-                chat_id=-879_002,
-                url=f"https://q2tg.invalid/token/{token}#fragment",
-            ),
-            message(
-                user_id=879_001,
-                chat_id=-879_002,
-                url=f"https://example.invalid/token/{token}",
-            ),
+        candidate = message(
+            user_id=user_id,
+            chat_id=chat_id,
+            url=url_template.format(token=token),
         )
 
         with (
@@ -361,12 +352,9 @@ class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
                 return_value=879_008,
             ),
         ):
-            for candidate in cases:
-                with self.subTest(url=candidate.entities[0].url):
-                    self.assertIsNone(
-                        await handler._inline_at_user_id(candidate, 879_005)
-                    )
+            assert await handler._inline_at_user_id(candidate, 879_005) is None
 
+    @pytest.mark.asyncio
     async def test_inline_result_rejects_expired_selection(self) -> None:
         handler = TGhandlers()
         inline_context = InlineAtContext(
@@ -405,8 +393,9 @@ class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch("src.tgbot.handlers.time.monotonic", return_value=101.0):
-            self.assertIsNone(await handler._inline_at_user_id(message, 881_005))
+            assert await handler._inline_at_user_id(message, 881_005) is None
 
+    @pytest.mark.asyncio
     async def test_receive_text_enqueues_valid_inline_at(self) -> None:
         handler = TGhandlers()
         inline_context = InlineAtContext(
@@ -474,10 +463,11 @@ class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
             await handler.receive_message(update, context)
 
         forwarded = task.call_args.args[0]
-        self.assertIsNone(forwarded.text)
-        self.assertEqual(forwarded.at_user_id, 876_005)
+        assert forwarded.text is None
+        assert forwarded.at_user_id == 876_005
         put.assert_awaited_once_with("task")
 
+    @pytest.mark.asyncio
     async def test_receive_text_logs_and_blocks_invalid_inline_at(self) -> None:
         message = SimpleNamespace(
             text="@Sample Card",
@@ -513,7 +503,7 @@ class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
             await TGhandlers().receive_message(update, context)
 
         error.assert_called_once()
-        self.assertIn("已阻止文本降级", error.call_args.args[0])
+        assert "已阻止文本降级" in error.call_args.args[0]
         task.assert_not_called()
         put.assert_not_awaited()
 
@@ -528,15 +518,13 @@ class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
 
         logged = TGhandlers._inline_at_entity_log(entity)
 
-        self.assertNotIn(token, repr(logged))
-        self.assertIn("<sha256:", str(logged["url"]))
+        assert token not in repr(logged)
+        assert "<sha256:" in str(logged["url"])
 
     def test_inline_member_name_reuses_onebot_user_name(self) -> None:
-        self.assertEqual(
-            TGhandlers._inline_member_name({"card": "", "nickname": ""}),
-            "OneBot 用户",
-        )
+        assert TGhandlers._inline_member_name({"card": "", "nickname": ""}) == "OneBot 用户"
 
+    @pytest.mark.asyncio
     async def test_at_contexts_have_capacity_limit(self) -> None:
         handler = TGhandlers()
         for index in range(INLINE_AT_CONTEXT_LIMIT):
@@ -566,9 +554,5 @@ class TelegramInlineAtTests(unittest.IsolatedAsyncioTestCase):
         ):
             await handler.at(update, cast(ContextTypes.DEFAULT_TYPE, SimpleNamespace()))
 
-        self.assertEqual(len(handler._inline_at_contexts), INLINE_AT_CONTEXT_LIMIT)
-        self.assertNotIn("old-0", handler._inline_at_contexts)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert len(handler._inline_at_contexts) == INLINE_AT_CONTEXT_LIMIT
+        assert "old-0" not in handler._inline_at_contexts

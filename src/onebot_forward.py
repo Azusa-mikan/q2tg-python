@@ -150,6 +150,10 @@ class ForwardPageBuilder:
                     nested_page = await self._create_page(nested_id, depth=depth + 1)
                 except Exception:  # noqa: BLE001
                     baselog.exception("OneBot 内层合并转发页面创建失败")
+                    baselog.warning(
+                        "OneBot 内层合并转发使用占位内容: depth=%s",
+                        depth,
+                    )
                     nodes.append(self._quote(UNSUPPORTED_FORWARD))
                 else:
                     nodes.append(self._forward_link(nested_page))

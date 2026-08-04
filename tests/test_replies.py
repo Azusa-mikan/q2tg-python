@@ -1,4 +1,3 @@
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -6,6 +5,8 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
+import pytest_asyncio
 from telegram.ext import ExtBot
 
 from src.forwarding import forward_onebot_to_telegram, forward_telegram_to_onebot
@@ -14,8 +15,10 @@ from src.qbot import QGateway
 from src.sql import Sql
 
 
-class ReplyForwardingTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
+@pytest.mark.asyncio
+class TestReplyForwarding:
+    @pytest_asyncio.fixture(autouse=True)
+    async def setup_database(self):
         self.directory = TemporaryDirectory()
         self.cache = Sql(Path(self.directory.name) / "cache.sqlite3")
         await self.cache.load()
@@ -26,10 +29,11 @@ class ReplyForwardingTests(unittest.IsolatedAsyncioTestCase):
             tg_chat_id=-456,
             tg_message_ids=(200, 201),
         )
-
-    async def asyncTearDown(self) -> None:
-        await self.cache.close()
-        self.directory.cleanup()
+        try:
+            yield
+        finally:
+            await self.cache.close()
+            self.directory.cleanup()
 
     async def test_onebot_reply_uses_first_telegram_message(self) -> None:
         bot = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(message_id=202)))
@@ -49,7 +53,7 @@ class ReplyForwardingTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         reply_parameters = bot.send_message.await_args.kwargs["reply_parameters"]
-        self.assertEqual(reply_parameters.message_id, 200)
+        assert reply_parameters.message_id == 200
 
     async def test_telegram_reply_adds_onebot_reply_segment(self) -> None:
         gateway = SimpleNamespace(send_group_message=AsyncMock(return_value=102))
@@ -67,7 +71,7 @@ class ReplyForwardingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         segments = gateway.send_group_message.await_args.kwargs["message"]
-        self.assertEqual(segments[0], {"type": "reply", "data": {"id": "100"}})
+        assert segments[0] == {"type": "reply", "data": {"id": "100"}}
 
     async def test_missing_mapping_falls_back_to_normal_message(self) -> None:
         gateway = SimpleNamespace(send_group_message=AsyncMock(return_value=103))
@@ -85,8 +89,4 @@ class ReplyForwardingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         segments = gateway.send_group_message.await_args.kwargs["message"]
-        self.assertNotEqual(segments[0]["type"], "reply")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert segments[0]["type"] != "reply"

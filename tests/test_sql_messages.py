@@ -1,21 +1,23 @@
 import sqlite3
 import time
-import unittest
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import pytest
+
 from src.sql import Sql
 
 
-class SqlMessageTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestSqlMessage:
     async def test_application_setting_persists_and_updates(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "settings.sqlite3"
             database = Sql(path)
             await database.load()
-            self.assertIsNone(await database.get_setting("telegraph_access_token"))
+            assert await database.get_setting("telegraph_access_token") is None
             await database.set_setting("telegraph_access_token", "first-test-token")
             await database.set_setting("telegraph_access_token", "second-test-token")
             await database.close()
@@ -23,9 +25,9 @@ class SqlMessageTests(unittest.IsolatedAsyncioTestCase):
             reopened = Sql(path)
             await reopened.load()
             try:
-                self.assertEqual(
-                    await reopened.get_setting("telegraph_access_token"),
-                    "second-test-token",
+                assert (
+                    await reopened.get_setting("telegraph_access_token")
+                    == "second-test-token"
                 )
             finally:
                 await reopened.close()
@@ -36,10 +38,10 @@ class SqlMessageTests(unittest.IsolatedAsyncioTestCase):
             side_effect=RuntimeError("migration failed"),
         ):
             cache = Sql(Path(directory) / "cache.sqlite3")
-            with self.assertRaisesRegex(RuntimeError, "migration failed"):
+            with pytest.raises(RuntimeError, match="migration failed"):
                 await cache.load()
 
-        with self.assertRaisesRegex(RuntimeError, "尚未加载"):
+        with pytest.raises(RuntimeError, match="尚未加载"):
             await cache.get_tg_group(123)
 
     async def test_message_mapping_persists_and_supports_both_directions(self) -> None:
@@ -48,15 +50,15 @@ class SqlMessageTests(unittest.IsolatedAsyncioTestCase):
             cache = Sql(path)
             await cache.load()
             await cache.bind_group(123, -789)
-            self.assertTrue(await cache.get_tg_forward_enabled(-789))
-            self.assertFalse(await cache.get_bot_forward_enabled(-789))
-            self.assertTrue(await cache.set_bot_forward_enabled(-789, True))
-            self.assertTrue(await cache.get_bot_forward_enabled(-789))
-            self.assertTrue(await cache.set_tg_forward_enabled(-789, False))
-            self.assertFalse(await cache.get_tg_forward_enabled(-789))
-            self.assertTrue(await cache.get_id_show_enabled(-789))
-            self.assertTrue(await cache.set_id_show_enabled(-789, False))
-            self.assertFalse(await cache.get_id_show_enabled(-789))
+            assert await cache.get_tg_forward_enabled(-789)
+            assert not await cache.get_bot_forward_enabled(-789)
+            assert await cache.set_bot_forward_enabled(-789, True)
+            assert await cache.get_bot_forward_enabled(-789)
+            assert await cache.set_tg_forward_enabled(-789, False)
+            assert not await cache.get_tg_forward_enabled(-789)
+            assert await cache.get_id_show_enabled(-789)
+            assert await cache.set_id_show_enabled(-789, False)
+            assert not await cache.get_id_show_enabled(-789)
             await cache.set_message_mapping(
                 q_group_id=123,
                 q_message_ids=(455, 456),
@@ -67,38 +69,34 @@ class SqlMessageTests(unittest.IsolatedAsyncioTestCase):
             by_onebot = await cache.get_tg_message(123, 456)
             by_first_onebot = await cache.get_tg_message(123, 455)
             by_telegram = await cache.get_q_message(-789, 11)
-            self.assertIsNotNone(by_onebot)
-            self.assertIsNotNone(by_telegram)
-            self.assertIsNotNone(by_first_onebot)
             assert by_onebot is not None
             assert by_telegram is not None
-            self.assertEqual(by_onebot.tg_message_ids, (10, 11))
-            self.assertEqual(by_telegram.q_message_ids, (455, 456))
+            assert by_onebot.tg_message_ids == (10, 11)
+            assert by_telegram.q_message_ids == (455, 456)
             assert by_first_onebot is not None
-            self.assertEqual(by_first_onebot.tg_message_ids, (10, 11))
-            self.assertGreater(by_onebot.expires_at - time.time(), 29 * 24 * 60 * 60)
+            assert by_first_onebot.tg_message_ids == (10, 11)
+            assert by_onebot.expires_at - time.time() > 29 * 24 * 60 * 60
             await cache.close()
 
             reopened = Sql(path)
             await reopened.load()
             persisted = await reopened.get_tg_message(123, 456)
-            self.assertIsNotNone(persisted)
             assert persisted is not None
-            self.assertEqual(persisted.tg_message_ids, (10, 11))
-            self.assertEqual(persisted.q_message_ids, (455, 456))
-            self.assertEqual(await reopened.get_tg_group(123), -789)
-            self.assertFalse(await reopened.get_tg_forward_enabled(-789))
-            self.assertTrue(await reopened.get_bot_forward_enabled(-789))
-            self.assertFalse(await reopened.get_id_show_enabled(-789))
+            assert persisted.tg_message_ids == (10, 11)
+            assert persisted.q_message_ids == (455, 456)
+            assert await reopened.get_tg_group(123) == -789
+            assert not await reopened.get_tg_forward_enabled(-789)
+            assert await reopened.get_bot_forward_enabled(-789)
+            assert not await reopened.get_id_show_enabled(-789)
             await reopened.unbind_tg_group(-789)
             await reopened.bind_group(123, -789)
-            self.assertFalse(await reopened.get_bot_forward_enabled(-789))
-            self.assertTrue(await reopened.get_id_show_enabled(-789))
+            assert not await reopened.get_bot_forward_enabled(-789)
+            assert await reopened.get_id_show_enabled(-789)
             await reopened.close()
 
             with closing(sqlite3.connect(path)) as connection:
                 journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
-            self.assertEqual(journal_mode, ("wal",))
+            assert journal_mode == ("wal",)
 
     async def test_existing_single_onebot_mapping_is_migrated(self) -> None:
         with TemporaryDirectory() as directory:
@@ -140,14 +138,10 @@ class SqlMessageTests(unittest.IsolatedAsyncioTestCase):
             try:
                 mapping = await cache.get_tg_message(123, 456)
                 assert mapping is not None
-                self.assertEqual(mapping.q_message_ids, (456,))
-                self.assertEqual(mapping.tg_message_ids, (10,))
+                assert mapping.q_message_ids == (456,)
+                assert mapping.tg_message_ids == (10,)
             finally:
                 await cache.close()
 
             with closing(sqlite3.connect(path)) as connection:
-                self.assertEqual(connection.execute("PRAGMA user_version").fetchone(), (1,))
-
-
-if __name__ == "__main__":
-    unittest.main()
+                assert connection.execute("PRAGMA user_version").fetchone() == (1,)

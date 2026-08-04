@@ -1,10 +1,11 @@
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
+import pytest_asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -15,16 +16,19 @@ from src.sql import Sql
 from src.tgbot.handlers import TGhandlers
 
 
-class BindingNoticeTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
+@pytest.mark.asyncio
+class TestBindingNotices:
+    @pytest_asyncio.fixture(autouse=True)
+    async def setup_database(self):
         self.directory = TemporaryDirectory()
         self.sql = Sql(Path(self.directory.name) / "q2tg.db")
         await self.sql.load()
         self.handler = TGhandlers()
-
-    async def asyncTearDown(self) -> None:
-        await self.sql.close()
-        self.directory.cleanup()
+        try:
+            yield
+        finally:
+            await self.sql.close()
+            self.directory.cleanup()
 
     async def test_bind_and_unbind_send_each_side_the_other_group_name(self) -> None:
         message = SimpleNamespace(reply_text=AsyncMock())
@@ -76,25 +80,19 @@ class BindingNoticeTests(unittest.IsolatedAsyncioTestCase):
         for task in telegram_tasks + onebot_tasks:
             await task.send()
 
-        self.assertEqual(
-            [call.args[0] for call in message.reply_text.await_args_list],
-            [
+        assert [call.args[0] for call in message.reply_text.await_args_list] == [
                 "已绑定群 Example OneBot Group",
                 "已解绑群 Example OneBot Group",
-            ],
-        )
-        self.assertEqual(
-            [
+            ]
+        assert [
                 call.kwargs["message"][0]["data"]["text"]
                 for call in gateway.send_group_message.await_args_list
-            ],
-            [
+            ] == [
                 "已绑定群 Example Telegram Group",
                 "已解绑群 Example Telegram Group",
-            ],
-        )
+            ]
         gateway.get_group_list.assert_awaited_once_with()
-        self.assertEqual(gateway.get_group_info.await_count, 2)
+        assert gateway.get_group_info.await_count == 2
         gateway.get_group_info.assert_any_await(123_456_789)
 
     async def test_bind_rejects_group_missing_from_onebot_group_list(self) -> None:
@@ -125,7 +123,7 @@ class BindingNoticeTests(unittest.IsolatedAsyncioTestCase):
 
         message.reply_text.assert_awaited_once_with("OneBot端未找到该群聊")
         gateway.get_group_info.assert_not_awaited()
-        self.assertIsNone(await self.sql.get_q_group(-456))
+        assert await self.sql.get_q_group(-456) is None
 
     async def test_bind_reports_and_logs_onebot_error(self) -> None:
         message = SimpleNamespace(reply_text=AsyncMock())
@@ -155,7 +153,7 @@ class BindingNoticeTests(unittest.IsolatedAsyncioTestCase):
 
         message.reply_text.assert_awaited_once_with("OneBot 错误，请检查日志")
         log_exception.assert_called_once()
-        self.assertIsNone(await self.sql.get_q_group(-456))
+        assert await self.sql.get_q_group(-456) is None
 
     async def test_unbind_keeps_mapping_when_group_info_request_fails(self) -> None:
         await self.sql.bind_group(123_456_789, -456)
@@ -186,8 +184,4 @@ class BindingNoticeTests(unittest.IsolatedAsyncioTestCase):
 
         message.reply_text.assert_awaited_once_with("OneBot 错误，请检查日志")
         log_exception.assert_called_once()
-        self.assertEqual(await self.sql.get_q_group(-456), 123_456_789)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert await self.sql.get_q_group(-456) == 123_456_789

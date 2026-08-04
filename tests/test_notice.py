@@ -1,8 +1,9 @@
 import asyncio
-import unittest
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from src.bus import MessageBus
 from src.messages import SendLane, SendTarget, SendTask
@@ -10,7 +11,8 @@ from src.notice import enqueue_bridge_notice
 from src.qbot import QGateway
 
 
-class BridgeNoticeTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestBridgeNotice:
     async def test_enqueues_independent_tasks_for_both_sides(self) -> None:
         bus = MessageBus()
         telegram_send = AsyncMock()
@@ -27,14 +29,12 @@ class BridgeNoticeTests(unittest.IsolatedAsyncioTestCase):
         telegram_task = await bus.telegram_system_queue.get()
         onebot_task = await bus.onebot_system_queue.get()
         try:
-            self.assertIsInstance(telegram_task, SendTask)
-            self.assertIsInstance(onebot_task, SendTask)
             assert isinstance(telegram_task, SendTask)
             assert isinstance(onebot_task, SendTask)
-            self.assertIs(telegram_task.target, SendTarget.TELEGRAM)
-            self.assertIs(onebot_task.target, SendTarget.ONEBOT)
-            self.assertEqual(telegram_task.max_attempts, 1)
-            self.assertEqual(onebot_task.max_attempts, 1)
+            assert telegram_task.target is SendTarget.TELEGRAM
+            assert onebot_task.target is SendTarget.ONEBOT
+            assert telegram_task.max_attempts == 1
+            assert onebot_task.max_attempts == 1
             await telegram_task.send()
             await onebot_task.send()
         finally:
@@ -79,8 +79,8 @@ class BridgeNoticeTests(unittest.IsolatedAsyncioTestCase):
 
         telegram_send.assert_awaited_once()
         gateway.send_group_message.assert_awaited_once()
-        self.assertTrue(bus.telegram_system_queue.empty())
-        self.assertTrue(bus.onebot_system_queue.empty())
+        assert bus.telegram_system_queue.empty()
+        assert bus.onebot_system_queue.empty()
 
     async def test_full_target_queue_only_drops_that_side(self) -> None:
         bus = MessageBus(maxsize=1)
@@ -102,10 +102,6 @@ class BridgeNoticeTests(unittest.IsolatedAsyncioTestCase):
                 bus=bus,
             )
 
-        self.assertEqual(bus.telegram_system_queue.qsize(), 1)
-        self.assertEqual(bus.onebot_system_queue.qsize(), 1)
+        assert bus.telegram_system_queue.qsize() == 1
+        assert bus.onebot_system_queue.qsize() == 1
         error.assert_called_once()
-
-
-if __name__ == "__main__":
-    unittest.main()

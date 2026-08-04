@@ -1,10 +1,11 @@
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, call, patch
 
+import pytest
+import pytest_asyncio
 from telegram import ChatMember, Update
 from telegram.ext import ContextTypes
 
@@ -13,8 +14,10 @@ from src.sql import Sql
 from src.tgbot.handlers import TGhandlers
 
 
-class UnpinTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
+@pytest.mark.asyncio
+class TestUnpin:
+    @pytest_asyncio.fixture(autouse=True)
+    async def setup(self):
         self.directory = TemporaryDirectory()
         self.sql = Sql(Path(self.directory.name) / "unpin.sqlite3")
         await self.sql.load()
@@ -26,10 +29,11 @@ class UnpinTests(unittest.IsolatedAsyncioTestCase):
             tg_message_ids=(201, 202),
         )
         self.handler = TGhandlers()
-
-    async def asyncTearDown(self) -> None:
-        await self.sql.close()
-        self.directory.cleanup()
+        try:
+            yield
+        finally:
+            await self.sql.close()
+            self.directory.cleanup()
 
     async def _unpin(
         self,
@@ -71,17 +75,14 @@ class UnpinTests(unittest.IsolatedAsyncioTestCase):
             status=ChatMember.ADMINISTRATOR,
         )
 
-        self.assertEqual(
-            gateway.delete_essence_message.await_args_list,
-            [call(-1_001), call(-1_002)],
-        )
-        self.assertEqual(
-            bot.unpin_chat_message.await_args_list,
-            [
-                call(chat_id=-100_123, message_id=201),
-                call(chat_id=-100_123, message_id=202),
-            ],
-        )
+        assert gateway.delete_essence_message.await_args_list == [
+            call(-1_001),
+            call(-1_002),
+        ]
+        assert bot.unpin_chat_message.await_args_list == [
+            call(chat_id=-100_123, message_id=201),
+            call(chat_id=-100_123, message_id=202),
+        ]
         command.reply_text.assert_not_awaited()
         command.delete.assert_awaited_once_with()
 
@@ -110,7 +111,7 @@ class UnpinTests(unittest.IsolatedAsyncioTestCase):
             action_error=RuntimeError("permission denied"),
         )
 
-        self.assertEqual(gateway.delete_essence_message.await_count, 2)
+        assert gateway.delete_essence_message.await_count == 2
         bot.unpin_chat_message.assert_not_awaited()
         command.delete.assert_not_awaited()
         command.reply_text.assert_awaited_once_with(
@@ -127,7 +128,3 @@ class UnpinTests(unittest.IsolatedAsyncioTestCase):
         bot.unpin_chat_message.assert_not_awaited()
         command.delete.assert_not_awaited()
         command.reply_text.assert_awaited_once_with("OneBot 连接已断开，请稍后重试")
-
-
-if __name__ == "__main__":
-    unittest.main()

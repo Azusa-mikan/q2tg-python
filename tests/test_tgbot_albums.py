@@ -1,11 +1,11 @@
 import asyncio
-import unittest
 from functools import partial
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 from telegram import Message
 
 from src.media import media_item_budget, media_queue_budget
@@ -14,7 +14,8 @@ from src.processing import ProcessingTask
 from src.tgbot.handlers import TELEGRAM_DOWNLOAD_LIMIT, TELEGRAM_VIDEO_LIMIT, TGhandlers
 
 
-class TelegramAlbumTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestTelegramAlbum:
     async def test_cancelled_flush_removes_pending_album(self) -> None:
         handler = TGhandlers()
         message = cast(Message, SimpleNamespace())
@@ -22,11 +23,11 @@ class TelegramAlbumTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("src.tgbot.handlers.asyncio.sleep", new_callable=AsyncMock) as sleep:
             sleep.side_effect = asyncio.CancelledError
-            with self.assertRaises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
                 await handler._flush_album("album")
 
-        self.assertNotIn("album", handler._albums)
-        self.assertNotIn("album", handler._album_tasks)
+        assert "album" not in handler._albums
+        assert "album" not in handler._album_tasks
 
     async def test_mixed_media_group_is_downloaded_in_message_order(self) -> None:
         initial_items = media_item_budget.used
@@ -98,22 +99,19 @@ class TelegramAlbumTests(unittest.IsolatedAsyncioTestCase):
                 await handler._enqueue_media(messages)
 
             task = submit.call_args.args[0]
-            self.assertIsInstance(task, ProcessingTask)
             assert isinstance(task, ProcessingTask)
-            self.assertIsInstance(task.run, partial)
             assert isinstance(task.run, partial)
             message = task.run.args[0]
-            self.assertIsInstance(message, TelegramMessage)
             assert isinstance(message, TelegramMessage)
-            self.assertEqual(message.message_ids, (1, 2))
-            self.assertEqual([item.kind for item in message.media], ["image", "video"])
-            self.assertEqual(message.text, "caption")
+            assert message.message_ids == (1, 2)
+            assert [item.kind for item in message.media] == ["image", "video"]
+            assert message.text == "caption"
             await task.cleanup()
         finally:
             await handler.download_client.aclose()
 
-        self.assertEqual(media_item_budget.used, initial_items)
-        self.assertEqual(media_queue_budget.used, initial_bytes)
+        assert media_item_budget.used == initial_items
+        assert media_queue_budget.used == initial_bytes
 
     async def test_oversized_video_is_rejected_before_download(self) -> None:
         video = SimpleNamespace(
@@ -138,7 +136,7 @@ class TelegramAlbumTests(unittest.IsolatedAsyncioTestCase):
                 new_callable=AsyncMock,
                 return_value=True,
             ),
-            self.assertRaisesRegex(ValueError, "媒体超过 20 MB，无法转发"),
+            pytest.raises(ValueError, match="媒体超过 20 MB，无法转发"),
         ):
             await handler._enqueue_media([message])
 
@@ -192,16 +190,16 @@ class TelegramAlbumTests(unittest.IsolatedAsyncioTestCase):
             assert put.await_args is not None
             task = put.await_args.args[0]
             forwarded = task.send.args[0]
-            self.assertEqual(forwarded.media[0].kind, "file")
-            self.assertEqual(forwarded.media[0].content.filename, "archive.zip")
-            self.assertEqual(forwarded.text, "file caption")
+            assert forwarded.media[0].kind == "file"
+            assert forwarded.media[0].content.filename == "archive.zip"
+            assert forwarded.text == "file caption"
             assert task.finalize is not None
             await task.finalize()
         finally:
             await handler.download_client.aclose()
 
-        self.assertEqual(media_item_budget.used, initial_items)
-        self.assertEqual(media_queue_budget.used, initial_bytes)
+        assert media_item_budget.used == initial_items
+        assert media_queue_budget.used == initial_bytes
 
     async def test_audio_is_forwarded_as_onebot_file(self) -> None:
         initial_items = media_item_budget.used
@@ -254,17 +252,17 @@ class TelegramAlbumTests(unittest.IsolatedAsyncioTestCase):
             assert put.await_args is not None
             task = put.await_args.args[0]
             forwarded = task.send.args[0]
-            self.assertEqual(forwarded.media[0].kind, "file")
-            self.assertEqual(forwarded.media[0].content.filename, "example-song.mp3")
-            self.assertEqual(forwarded.media[0].content.media_type, "audio/mpeg")
-            self.assertEqual(forwarded.text, "audio caption")
+            assert forwarded.media[0].kind == "file"
+            assert forwarded.media[0].content.filename == "example-song.mp3"
+            assert forwarded.media[0].content.media_type == "audio/mpeg"
+            assert forwarded.text == "audio caption"
             assert task.finalize is not None
             await task.finalize()
         finally:
             await handler.download_client.aclose()
 
-        self.assertEqual(media_item_budget.used, initial_items)
-        self.assertEqual(media_queue_budget.used, initial_bytes)
+        assert media_item_budget.used == initial_items
+        assert media_queue_budget.used == initial_bytes
 
     async def test_photo_over_10_mb_is_allowed_up_to_download_limit(self) -> None:
         size = 10_000_001
@@ -314,8 +312,4 @@ class TelegramAlbumTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await handler.download_client.aclose()
 
-        self.assertLess(size, TELEGRAM_DOWNLOAD_LIMIT)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert size < TELEGRAM_DOWNLOAD_LIMIT

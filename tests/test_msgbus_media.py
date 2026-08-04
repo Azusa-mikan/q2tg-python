@@ -1,6 +1,5 @@
-import unittest
-
 import httpx
+import pytest
 from telegram import InputFile
 
 from src.forwarding import ONEBOT_MEDIA_LIMIT, download_image
@@ -8,7 +7,8 @@ from src.media import media_item_budget
 from src.messages import MediaTooLargeError
 
 
-class MessageBusMediaTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestMessageBusMedia:
     async def test_download_image_streams_into_spool(self) -> None:
         initial_items = media_item_budget.used
 
@@ -18,11 +18,11 @@ class MessageBusMediaTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             media = await download_image(client, "https://example.test/image", filename="image.jpg")
         try:
-            self.assertEqual(media.size, 5)
-            self.assertEqual(media.file.read(), b"image")
+            assert media.size == 5
+            assert media.file.read() == b"image"
         finally:
             media.close()
-        self.assertEqual(media_item_budget.used, initial_items)
+        assert media_item_budget.used == initial_items
 
     async def test_download_rejects_oversized_content_length(self) -> None:
         initial_items = media_item_budget.used
@@ -35,9 +35,9 @@ class MessageBusMediaTests(unittest.IsolatedAsyncioTestCase):
             )
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            with self.assertRaisesRegex(MediaTooLargeError, "20 MB，无法转发"):
+            with pytest.raises(MediaTooLargeError, match="20 MB，无法转发"):
                 await download_image(client, "https://example.test/image", filename="image.jpg")
-        self.assertEqual(media_item_budget.used, initial_items)
+        assert media_item_budget.used == initial_items
 
     async def test_ptb_upload_uses_file_handle(self) -> None:
         initial_items = media_item_budget.used
@@ -53,11 +53,7 @@ class MessageBusMediaTests(unittest.IsolatedAsyncioTestCase):
                 filename=media.filename,
                 read_file_handle=False,
             )
-            self.assertIs(upload.input_file_content, media.file)
+            assert upload.input_file_content is media.file
         finally:
             media.close()
-        self.assertEqual(media_item_budget.used, initial_items)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert media_item_budget.used == initial_items

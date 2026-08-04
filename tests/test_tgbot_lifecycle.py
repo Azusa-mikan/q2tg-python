@@ -1,15 +1,15 @@
 import asyncio
-import unittest
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from telegram.ext import Application
 
 from src.tgbot import BOT_COMMANDS, TGBot
 
 
-class TGBotLifecycleTests(unittest.IsolatedAsyncioTestCase):
+class TestTGBotLifecycle:
     def test_proxy_is_applied_to_bot_api_and_polling(self) -> None:
         builder = MagicMock()
         builder.token.return_value = builder
@@ -28,12 +28,13 @@ class TGBotLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 proxy_url="http://127.0.0.1:8080",
             )
 
-        self.assertIs(result, built_app)
+        assert result is built_app
         builder.media_write_timeout.assert_called_once_with(120)
         builder.read_timeout.assert_called_once_with(60)
         builder.proxy.assert_called_once_with("http://127.0.0.1:8080")
         builder.get_updates_proxy.assert_called_once_with("http://127.0.0.1:8080")
 
+    @pytest.mark.asyncio
     async def test_only_first_start_drops_pending_updates(self) -> None:
         bot = TGBot.__new__(TGBot)
         updater = SimpleNamespace(start_polling=AsyncMock(), stop=AsyncMock())
@@ -59,14 +60,10 @@ class TGBotLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await bot.shutdown()
         await bot.run()
 
-        self.assertEqual(
-            [call.kwargs["drop_pending_updates"] for call in updater.start_polling.await_args_list],
-            [True, False],
-        )
-        self.assertEqual(bot.app.bot.set_my_commands.await_count, 1)
+        assert [
+            call.kwargs["drop_pending_updates"]
+            for call in updater.start_polling.await_args_list
+        ] == [True, False]
+        assert bot.app.bot.set_my_commands.await_count == 1
         bot.app.bot.set_my_commands.assert_awaited_with(BOT_COMMANDS)
         await bot.shutdown()
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -1,4 +1,3 @@
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -6,6 +5,8 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
+import pytest_asyncio
 from telegram import LinkPreviewOptions
 from telegram.ext import ExtBot
 
@@ -15,8 +16,9 @@ from src.qbot import QGateway, receive_onebot_event
 from src.sql import Sql
 
 
-class OneBotGroupMemberTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
+class TestOneBotGroupMember:
+    @pytest_asyncio.fixture(autouse=True)
+    async def setup_database(self):
         self.directory = TemporaryDirectory()
         self.sql = Sql(Path(self.directory.name) / "group-member.sqlite3")
         await self.sql.load()
@@ -35,10 +37,11 @@ class OneBotGroupMemberTests(unittest.IsolatedAsyncioTestCase):
             QGateway,
             SimpleNamespace(get_group_member_info=self.get_group_member_info),
         )
-
-    async def asyncTearDown(self) -> None:
-        await self.sql.close()
-        self.directory.cleanup()
+        try:
+            yield
+        finally:
+            await self.sql.close()
+            self.directory.cleanup()
 
     async def _send_event(self, event: dict) -> SendTask:
         with (
@@ -48,12 +51,12 @@ class OneBotGroupMemberTests(unittest.IsolatedAsyncioTestCase):
             await receive_onebot_event(event, self.bot, self.client)
         task = await self.bus.telegram_event_queue.get()
         self.bus.telegram_event_queue.task_done()
-        self.assertIsInstance(task, SendTask)
         assert isinstance(task, SendTask)
-        self.assertIs(task.target, SendTarget.TELEGRAM)
-        self.assertIs(task.lane, SendLane.EVENT)
+        assert task.target is SendTarget.TELEGRAM
+        assert task.lane is SendLane.EVENT
         return task
 
+    @pytest.mark.asyncio
     async def test_group_increase_sends_join_message_and_ignores_sub_type(self) -> None:
         task = await self._send_event(
             {
@@ -81,6 +84,7 @@ class OneBotGroupMemberTests(unittest.IsolatedAsyncioTestCase):
             no_cache=True,
         )
 
+    @pytest.mark.asyncio
     async def test_group_decrease_sends_leave_message_without_operator(self) -> None:
         await self.sql.set_id_show_enabled(-100123, False)
         task = await self._send_event(
@@ -105,6 +109,7 @@ class OneBotGroupMemberTests(unittest.IsolatedAsyncioTestCase):
         )
         self.get_group_member_info.assert_awaited_once_with(123, 101)
 
+    @pytest.mark.asyncio
     async def test_missing_name_follows_id_show_fallback(self) -> None:
         self.get_group_member_info.side_effect = RuntimeError("member left")
         task = await self._send_event(
@@ -129,6 +134,7 @@ class OneBotGroupMemberTests(unittest.IsolatedAsyncioTestCase):
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
+    @pytest.mark.asyncio
     async def test_malformed_member_event_is_not_queued(self) -> None:
         with (
             patch("src.qbot.message_bus", self.bus),
@@ -145,9 +151,5 @@ class OneBotGroupMemberTests(unittest.IsolatedAsyncioTestCase):
                 self.client,
             )
 
-        self.assertTrue(self.bus.telegram_event_queue.empty())
+        assert self.bus.telegram_event_queue.empty()
         warning.assert_called_once()
-
-
-if __name__ == "__main__":
-    unittest.main()

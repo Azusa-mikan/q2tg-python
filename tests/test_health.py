@@ -1,11 +1,11 @@
-import unittest
-
 import httpx
+import pytest
 
 from src.api import fapp
 
 
-class HealthTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestHealth:
     async def test_health_endpoint(self) -> None:
         transport = httpx.ASGITransport(app=fapp)
         async with httpx.AsyncClient(
@@ -14,9 +14,5 @@ class HealthTests(unittest.IsolatedAsyncioTestCase):
         ) as client:
             response = await client.get("/healthz")
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok"})
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}

@@ -85,13 +85,14 @@ def enqueue_onebot_notice(
     *,
     q_group_id: int,
     text: str,
+    label: str = "onebot-notice",
     bus: MessageBus | None = None,
 ) -> None:
     """向 OneBot 队列投递单侧通知。"""
     bus = bus or message_bus
     _enqueue_notice(
         bus,
-        onebot_notice_task(gateway, q_group_id=q_group_id, text=text),
+        onebot_notice_task(gateway, q_group_id=q_group_id, text=text, label=label),
     )
 
 

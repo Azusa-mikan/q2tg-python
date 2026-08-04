@@ -1,15 +1,16 @@
 import asyncio
-import unittest
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi import FastAPI
 
 from src.api import lifespan
 
 
-class ApiLifecycleTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestApiLifecycle:
     async def test_failed_purger_does_not_skip_resource_shutdown(self) -> None:
         with (
             patch("src.api.sql.load", new_callable=AsyncMock) as load,
@@ -25,7 +26,3 @@ class ApiLifecycleTests(unittest.IsolatedAsyncioTestCase):
         load.assert_awaited_once_with()
         close.assert_awaited_once_with()
         close_media.assert_called_once_with()
-
-
-if __name__ == "__main__":
-    unittest.main()

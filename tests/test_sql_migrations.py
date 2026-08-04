@@ -1,14 +1,16 @@
 import sqlite3
-import unittest
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+import pytest
 
 from src.sql import Sql
 from src.sql_migrations import HEAD_REVISION
 
 
-class SqlMigrationTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestSqlMigration:
     async def test_current_database_is_adopted_without_rebuilding(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "current.sqlite3"
@@ -31,9 +33,8 @@ class SqlMigrationTests(unittest.IsolatedAsyncioTestCase):
             await adopted.load()
             try:
                 mapping = await adopted.get_tg_message(123, 457)
-                self.assertIsNotNone(mapping)
                 assert mapping is not None
-                self.assertEqual(mapping.q_message_ids, (456, 457))
+                assert mapping.q_message_ids == (456, 457)
             finally:
                 await adopted.close()
 
@@ -42,8 +43,8 @@ class SqlMigrationTests(unittest.IsolatedAsyncioTestCase):
                     "SELECT version_num FROM alembic_version"
                 ).fetchone()
                 user_version = connection.execute("PRAGMA user_version").fetchone()
-            self.assertEqual(revision, (HEAD_REVISION,))
-            self.assertEqual(user_version, (1,))
+            assert revision == (HEAD_REVISION,)
+            assert user_version == (1,)
 
     async def test_incomplete_schema_is_rejected(self) -> None:
         with TemporaryDirectory() as directory:
@@ -55,7 +56,7 @@ class SqlMigrationTests(unittest.IsolatedAsyncioTestCase):
                 connection.commit()
 
             database = Sql(path)
-            with self.assertRaisesRegex(RuntimeError, "无法识别 SQLite schema"):
+            with pytest.raises(RuntimeError, match="无法识别 SQLite schema"):
                 await database.load()
 
             with closing(sqlite3.connect(path)) as connection:
@@ -65,7 +66,7 @@ class SqlMigrationTests(unittest.IsolatedAsyncioTestCase):
                         "SELECT name FROM sqlite_master WHERE type = 'table'"
                     )
                 }
-            self.assertNotIn("alembic_version", tables)
+            assert "alembic_version" not in tables
 
     async def test_unknown_user_version_is_rejected(self) -> None:
         with TemporaryDirectory() as directory:
@@ -75,5 +76,5 @@ class SqlMigrationTests(unittest.IsolatedAsyncioTestCase):
                 connection.commit()
 
             database = Sql(path)
-            with self.assertRaisesRegex(RuntimeError, "无法识别 SQLite 数据库版本 2"):
+            with pytest.raises(RuntimeError, match="无法识别 SQLite 数据库版本 2"):
                 await database.load()

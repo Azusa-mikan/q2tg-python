@@ -1,10 +1,10 @@
 import asyncio
-import unittest
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 from telegram.ext import ExtBot
 
 from src.forwarding import forward_onebot_to_telegram, onebot_message_text
@@ -12,7 +12,8 @@ from src.messages import OneBotMessage
 from src.qbot import QGateway
 
 
-class MentionTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestMentions:
     async def test_mentions_preserve_segment_order_and_reuse_member_lookup(self) -> None:
         gateway = SimpleNamespace(
             get_group_member_info=AsyncMock(
@@ -38,11 +39,8 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
             cast(QGateway, gateway),
         )
 
-        self.assertEqual(
-            text,
-            "hello @Group Card and @Second User / @Group Card / @全体成员",
-        )
-        self.assertEqual(gateway.get_group_member_info.await_count, 2)
+        assert text == "hello @Group Card and @Second User / @Group Card / @全体成员"
+        assert gateway.get_group_member_info.await_count == 2
         gateway.get_group_member_info.assert_any_await(123, 100)
         gateway.get_group_member_info.assert_any_await(123, 200)
 
@@ -73,7 +71,7 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
         try:
             await asyncio.wait_for(both_started.wait(), timeout=1)
             release.set()
-            self.assertEqual(await task, "@User 100@User 200")
+            assert await task == "@User 100@User 200"
         finally:
             release.set()
             if not task.done():
@@ -103,8 +101,8 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
             member_names=member_names,
         )
 
-        self.assertEqual(first, "@Group Card")
-        self.assertEqual(second, "@Group Card[100]")
+        assert first == "@Group Card"
+        assert second == "@Group Card[100]"
         gateway.get_group_member_info.assert_awaited_once_with(123, 100)
 
     async def test_member_lookup_failure_falls_back_to_qq_number(self) -> None:
@@ -119,7 +117,7 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
                 cast(QGateway, gateway),
             )
 
-        self.assertEqual(text, "@OneBot 用户")
+        assert text == "@OneBot 用户"
         warning.assert_called_once()
 
     async def test_id_show_appends_qq_number_to_mention(self) -> None:
@@ -136,7 +134,7 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
             id_show_enabled=True,
         )
 
-        self.assertEqual(text, "@测试用户[101]")
+        assert text == "@测试用户[101]"
 
     async def test_id_show_uses_qq_number_as_fallback(self) -> None:
         gateway = SimpleNamespace(
@@ -151,7 +149,7 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
                 id_show_enabled=True,
             )
 
-        self.assertEqual(text, "@101")
+        assert text == "@101"
 
     async def test_self_mention_is_removed(self) -> None:
         gateway = SimpleNamespace(get_group_member_info=AsyncMock())
@@ -166,7 +164,7 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
             self_id=999,
         )
 
-        self.assertEqual(text, "把你妈妈抓走")
+        assert text == "把你妈妈抓走"
         gateway.get_group_member_info.assert_not_awaited()
 
     async def test_onebot_mention_is_visible_in_telegram_message(self) -> None:
@@ -211,8 +209,4 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
                     cast(QGateway, gateway),
                 )
 
-        self.assertEqual(bot.send_message.await_args.kwargs["text"], "OneBot User:\n@Bot Name")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert bot.send_message.await_args.kwargs["text"] == "OneBot User:\n@Bot Name"

@@ -23,7 +23,7 @@ from telegram import (
     ReplyParameters,
 )
 from telegram.constants import ParseMode
-from telegram.error import TimedOut
+from telegram.error import BadRequest, TimedOut
 from telegram.ext import ExtBot
 from telegram.helpers import escape_markdown
 
@@ -69,6 +69,7 @@ from src.notice import (
     enqueue_telegram_notice,
 )
 from src.processing import ProcessingTask
+from src.runtime_events import emit_runtime_event
 from src.runtime_stats import track_conversion
 from src.sql import sql
 from src.sticker import static_sticker_to_png, tgs_sticker_to_gif, video_sticker_to_gif
@@ -81,6 +82,7 @@ PHOTO_LIMIT = 10_000_000
 ONEBOT_MEDIA_LIMIT = MEDIA_SIZE_LIMIT
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 MAX_SEND_ATTEMPTS = 3
+UNAVAILABLE_REPLY_TEXT = "[回复了一个无法读取的消息]"
 TELEGRAM_VIDEO_LIMIT = 20_000_000
 TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_TEXT_LIMIT = 4096
@@ -424,6 +426,12 @@ async def forward_onebot_to_telegram(
 
     caption = f"{sender_name}:\n{text}" if text else f"{sender_name}:"
     if unavailable:
+        baselog.warning(
+            "OneBot 媒体缺少可用下载地址，使用提示文本: group=%s message=%s types=%s",
+            msg.group_id,
+            msg.message_id,
+            ",".join(dict.fromkeys(unavailable)),
+        )
         labels = {"image": "图片", "video": "视频", "record": "语音", "file": "文件"}
         notices = [
             f"[{labels[kind]}无法转发：缺少可用的 HTTP(S) 下载地址]"
@@ -437,14 +445,34 @@ async def forward_onebot_to_telegram(
     if msg.reply_message_id is not None:
         reply_mapping = await sql.get_tg_message(msg.group_id, msg.reply_message_id)
         if reply_mapping is not None and reply_mapping.tg_message_ids:
+            msg.reply_unavailable = False
+            emit_runtime_event("capability.succeeded", "onebot.reply.mapped")
             reply_parameters = ReplyParameters(
                 message_id=reply_mapping.tg_message_ids[0],
-                allow_sending_without_reply=True,
             )
+        else:
+            emit_runtime_event("capability.succeeded", "onebot.reply.unavailable")
+            msg.reply_unavailable = True
+            baselog.warning(
+                "OneBot 回复映射不存在，使用提示文本: group=%s message=%s reply=%s",
+                msg.group_id,
+                msg.message_id,
+                msg.reply_message_id,
+            )
+    if msg.reply_unavailable:
+        fallback = escape_markdown(UNAVAILABLE_REPLY_TEXT, version=2) if markdown_v2 else UNAVAILABLE_REPLY_TEXT
+        caption = f"{caption}\n{fallback}"
 
     if announcement is not None:
+        emit_runtime_event("capability.succeeded", "onebot.announcement")
         await _forward_announcement(
-            msg, bot, client, group_id, announcement, sender_name, reply_parameters
+            msg,
+            bot,
+            client,
+            group_id,
+            announcement,
+            caption if msg.reply_unavailable else f"{sender_name}:",
+            reply_parameters,
         )
     elif super_face_id is not None and not has_forwards:
         await _forward_super_face(
@@ -491,7 +519,7 @@ async def _forward_announcement(
     client: httpx.AsyncClient,
     group_id: int,
     announcement: tuple[str, str | None],
-    sender_name: str,
+    caption: str,
     reply_parameters: ReplyParameters | None,
 ) -> None:
     """把 OneBot 群公告正文作为文档发送，并在其后附加首张公告图片。"""
@@ -506,7 +534,7 @@ async def _forward_announcement(
         sent = await bot.send_document(
             chat_id=group_id,
             document=InputFile(content, filename=msg.announcement_filename),
-            caption=f"{sender_name}:",
+            caption=caption,
             reply_parameters=reply_parameters,
         )
         msg.tg_message_ids.append(sent.message_id)
@@ -524,7 +552,6 @@ async def _forward_announcement(
             )
             image_reply = ReplyParameters(
                 message_id=msg.tg_message_ids[0],
-                allow_sending_without_reply=True,
             )
             if image.size <= PHOTO_LIMIT:
                 sent = await bot.send_photo(
@@ -556,10 +583,11 @@ async def _forward_super_face(
     """发送超级表情对应的 Telegram Sticker；缺失映射时回退为文本。"""
     sticker_file_id = await onebot_super_face_file_id(bot, super_face_id)
     if sticker_file_id is not None:
+        emit_runtime_event("capability.succeeded", "onebot.face.super")
         if not msg.tg_message_ids:
             sent_header = await bot.send_message(
                 chat_id=group_id,
-                text=f"{sender_name}:",
+                text=caption if msg.reply_unavailable else f"{sender_name}:",
                 reply_parameters=reply_parameters,
             )
             msg.tg_message_ids.append(sent_header.message_id)
@@ -569,6 +597,11 @@ async def _forward_super_face(
         )
         msg.tg_message_ids.append(sent_sticker.message_id)
     else:
+        baselog.warning(
+            "OneBot 超级表情缺少 Telegram Sticker 映射，使用文本: group=%s message=%s",
+            msg.group_id,
+            msg.message_id,
+        )
         await _send_text_chunks(
             msg,
             bot,
@@ -611,6 +644,12 @@ async def _forward_media_album(
             )
         as_animations = any(_is_gif(content) for content in contents)
         as_photos = all(content.size <= PHOTO_LIMIT for content in contents)
+        total_size = sum(content.size for content in contents)
+        if 90_000_000 <= total_size <= 100_000_000:
+            emit_runtime_event(
+                "capability.succeeded",
+                "onebot.image-album.bytes-boundary",
+            )
         album: list[InputMediaPhoto | InputMediaDocument] = []
         if as_animations:
             await _send_downloaded_media_individually(
@@ -624,6 +663,7 @@ async def _forward_media_album(
                 parse_mode,
             )
         elif as_photos:
+            emit_runtime_event("capability.succeeded", "onebot.image-album.photo")
             album = [
                 InputMediaPhoto(
                     media=InputFile(
@@ -643,6 +683,7 @@ async def _forward_media_album(
                 )
             ]
         else:
+            emit_runtime_event("capability.succeeded", "onebot.image-album.document")
             album = [
                 InputMediaDocument(
                     media=InputFile(
@@ -801,6 +842,11 @@ def format_duration(seconds: int) -> str:
 
 def _event_member_text(name: str | None, user_id: int, *, show_id: bool) -> str:
     if name is None:
+        baselog.warning(
+            "OneBot 群成员名称不可用，使用通用名称: user=%s show_id=%s",
+            user_id,
+            show_id,
+        )
         return str(user_id) if show_id else ONEBOT_USER_NAME
     return f"{name}[{user_id}]" if show_id else name
 
@@ -1061,6 +1107,7 @@ async def _send_single_media(
             reply_parameters=item_reply,
         )
     elif is_gif:
+        emit_runtime_event("capability.succeeded", "onebot.image.animation")
         sent = await bot.send_animation(
             chat_id=group_id,
             animation=upload,
@@ -1070,6 +1117,7 @@ async def _send_single_media(
             reply_parameters=item_reply,
         )
     elif kind == "image" and content.size <= PHOTO_LIMIT:
+        emit_runtime_event("capability.succeeded", "onebot.image.photo")
         sent = await bot.send_photo(
             chat_id=group_id,
             photo=upload,
@@ -1079,6 +1127,7 @@ async def _send_single_media(
             reply_parameters=item_reply,
         )
     elif kind == "video" and _is_mp4(content):
+        emit_runtime_event("capability.succeeded", "onebot.media.video")
         sent = await bot.send_video(
             chat_id=group_id,
             video=upload,
@@ -1089,6 +1138,10 @@ async def _send_single_media(
             reply_parameters=item_reply,
         )
     else:
+        if kind == "image":
+            emit_runtime_event("capability.succeeded", "onebot.image.document")
+        elif kind == "file":
+            emit_runtime_event("capability.succeeded", "onebot.media.file")
         sent = await bot.send_document(
             chat_id=group_id,
             document=upload,
@@ -1181,6 +1234,21 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
         baselog.warning("Telegram 消息没有可转发的内容: %s", msg.message_ids)
         return
 
+    reply_q_message_id = None
+    if msg.reply_message_id is not None:
+        reply_mapping = await sql.get_q_message(msg.group_id, msg.reply_message_id)
+        if reply_mapping is not None and reply_mapping.q_message_ids:
+            emit_runtime_event("capability.succeeded", "telegram.reply.mapped")
+            reply_q_message_id = reply_mapping.q_message_ids[-1]
+        else:
+            emit_runtime_event("capability.succeeded", "telegram.reply.unavailable")
+            baselog.warning(
+                "Telegram 回复映射不存在，使用提示文本: chat=%s messages=%s reply=%s",
+                msg.group_id,
+                msg.message_ids,
+                msg.reply_message_id,
+            )
+
     batches: list[list[dict[str, Any]]]
     text = f"{msg.sender_name}:"
     if msg.forwarded_from is not None:
@@ -1189,6 +1257,8 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
         text += "\n"
     elif msg.text:
         text += f"\n{msg.text}"
+    if msg.reply_message_id is not None and reply_q_message_id is None:
+        text += f"\n{UNAVAILABLE_REPLY_TEXT}"
     if msg.media:
         if msg.media_ids is None:
             msg.media_ids = media_cache.set_media_batch(
@@ -1222,13 +1292,11 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
             )
         batches = [segments]
 
-    if msg.reply_message_id is not None:
-        reply_mapping = await sql.get_q_message(msg.group_id, msg.reply_message_id)
-        if reply_mapping is not None:
-            batches[0].insert(
-                0,
-                {"type": "reply", "data": {"id": str(reply_mapping.q_message_ids[-1])}},
-            )
+    if reply_q_message_id is not None:
+        batches[0].insert(
+            0,
+            {"type": "reply", "data": {"id": str(reply_q_message_id)}},
+        )
 
     for index in range(msg.next_onebot_batch, len(batches)):
         try:
@@ -1421,6 +1489,8 @@ async def _notify_onebot_telegram_failure(
     error: Exception,
 ) -> None:
     """Telegram 任务耗尽后只向来源 OneBot 群发送失败提示。"""
+    if isinstance(error, MediaTooLargeError):
+        emit_runtime_event("capability.succeeded", "onebot.media.rejected")
     text = (
         str(error)
         if isinstance(error, MediaTooLargeError)
@@ -1435,6 +1505,7 @@ async def _notify_onebot_telegram_failure(
         gateway,
         q_group_id=msg.group_id,
         text=text,
+        label=f"onebot-media-rejected:{msg.group_id}:{msg.message_id}",
     )
 
 
@@ -1538,10 +1609,42 @@ def onebot_forward_task(
     """创建目标为 Telegram、失败三次后仅通知 OneBot 的通用任务。"""
     return SendTask(
         target=SendTarget.TELEGRAM,
-        send=partial(forward_onebot_to_telegram, msg, bot, client, gateway),
+        send=partial(_forward_onebot_with_reply_fallback, msg, bot, client, gateway),
         failure_action=_telegram_failure_action,
         max_attempts=MAX_SEND_ATTEMPTS,
         on_failed=partial(_notify_onebot_telegram_failure, msg, gateway),
         finalize=partial(finalize_onebot_forward, msg, bot),
         label=f"onebot-to-telegram:{msg.group_id}:{msg.message_id}",
     )
+
+
+async def _forward_onebot_with_reply_fallback(
+    msg: OneBotMessage,
+    bot: ExtBot[None],
+    client: httpx.AsyncClient,
+    gateway: QGateway,
+) -> None:
+    """回复目标已从 Telegram 删除时，改用明确的不可读引用文本。"""
+    try:
+        await forward_onebot_to_telegram(msg, bot, client, gateway)
+    except BadRequest as error:
+        message = str(error).lower()
+        if (
+            msg.reply_message_id is None
+            or msg.reply_unavailable
+            or msg.tg_message_ids
+            or "repl" not in message
+            or "not found" not in message
+        ):
+            raise
+        baselog.warning(
+            "Telegram 回复目标不存在，使用提示文本: group=%s message=%s reply=%s",
+            msg.group_id,
+            msg.message_id,
+            msg.reply_message_id,
+        )
+        emit_runtime_event("capability.invalidated", "onebot.reply.mapped")
+        emit_runtime_event("capability.succeeded", "onebot.reply.unavailable")
+        msg.reply_message_id = None
+        msg.reply_unavailable = True
+        await forward_onebot_to_telegram(msg, bot, client, gateway)

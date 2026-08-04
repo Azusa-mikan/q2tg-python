@@ -32,6 +32,7 @@ from src.messages import (
     OneBotPokeEvent,
 )
 from src.notice import enqueue_onebot_notice
+from src.runtime_events import emit_runtime_event
 
 
 class QGateway:
@@ -548,6 +549,7 @@ async def receive_onebot_event(
         return
 
     reply_message_id = None
+    reply_unavailable = False
     for segment in segments:
         if segment.get("type") != "reply":
             continue
@@ -557,9 +559,23 @@ async def receive_onebot_event(
             try:
                 reply_message_id = int(reply_id)
             except ValueError:
-                pass
+                reply_unavailable = True
+                emit_runtime_event("capability.succeeded", "onebot.reply.unavailable")
+                qlog.warning(
+                    "OneBot 回复消息 ID 无法读取: group=%s message=%s",
+                    group_id,
+                    message_id,
+                )
         else:
             reply_message_id = _onebot_int(reply_id)
+            if reply_message_id is None:
+                reply_unavailable = True
+                emit_runtime_event("capability.succeeded", "onebot.reply.unavailable")
+                qlog.warning(
+                    "OneBot 回复消息 ID 无法读取: group=%s message=%s",
+                    group_id,
+                    message_id,
+                )
         break
 
     sender_name, sender_name_is_fallback = _sender_name(data, user_id)
@@ -572,6 +588,7 @@ async def receive_onebot_event(
         sender_name_is_fallback=sender_name_is_fallback,
         message=segments,
         reply_message_id=reply_message_id,
+        reply_unavailable=reply_unavailable,
     )
     if not begin_onebot_forward(group_id, message_id):
         qlog.warning(

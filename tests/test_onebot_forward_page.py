@@ -1,9 +1,10 @@
 import asyncio
 import re
-import unittest
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
+
+import pytest
 
 from src.messages import TelegraphPageRef
 from src.onebot_forward import (
@@ -23,7 +24,8 @@ def forward_message(forward_id: str, *, message_type: str = "group") -> dict:
     }
 
 
-class OneBotForwardPageTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestOneBotForwardPage:
     async def test_private_title_has_sixteen_random_characters(self) -> None:
         gateway = SimpleNamespace(
             get_forward_messages=AsyncMock(
@@ -43,13 +45,13 @@ class OneBotForwardPageTests(unittest.IsolatedAsyncioTestCase):
         )
 
         page = await builder.create("root")
-        self.assertEqual(page.url, "https://telegra.ph/x")
-        self.assertRegex(page.title, re.compile(r"^私聊的聊天记录 - [0-9a-f]{16}$"))
+        assert page.url == "https://telegra.ph/x"
+        assert re.fullmatch(r"私聊的聊天记录 - [0-9a-f]{16}", page.title)
 
         title, content = telegraph.create_page.await_args.args
-        self.assertRegex(title, re.compile(r"^私聊的聊天记录 - [0-9a-f]{16}$"))
-        self.assertEqual(content[0], {"tag": "hr"})
-        self.assertIn({"tag": "blockquote", "children": ["你好"]}, content)
+        assert re.fullmatch(r"私聊的聊天记录 - [0-9a-f]{16}", title)
+        assert content[0] == {"tag": "hr"}
+        assert {"tag": "blockquote", "children": ["你好"]} in content
 
     async def test_missing_sender_name_uses_onebot_user(self) -> None:
         gateway = SimpleNamespace(
@@ -72,7 +74,7 @@ class OneBotForwardPageTests(unittest.IsolatedAsyncioTestCase):
         await builder.create("root")
 
         content = telegraph.create_page.await_args.args[1]
-        self.assertIn({"tag": "p", "children": ["OneBot 用户:"]}, content)
+        assert {"tag": "p", "children": ["OneBot 用户:"]} in content
 
     async def test_at_uses_stranger_nickname_and_never_shows_id(self) -> None:
         gateway = SimpleNamespace(
@@ -101,11 +103,11 @@ class OneBotForwardPageTests(unittest.IsolatedAsyncioTestCase):
         await builder.create("root")
 
         content = telegraph.create_page.await_args.args[1]
-        self.assertIn(
-            {"tag": "blockquote", "children": ["@Example Target@Example Target"]},
-            content,
-        )
-        self.assertNotIn("820001", repr(content))
+        assert {
+            "tag": "blockquote",
+            "children": ["@Example Target@Example Target"],
+        } in content
+        assert "820001" not in repr(content)
         gateway.get_stranger_info.assert_awaited_once_with(820001)
 
     async def test_at_lookup_failure_reuses_onebot_user_name(self) -> None:
@@ -130,11 +132,8 @@ class OneBotForwardPageTests(unittest.IsolatedAsyncioTestCase):
         await builder.create("root")
 
         content = telegraph.create_page.await_args.args[1]
-        self.assertIn(
-            {"tag": "blockquote", "children": ["@OneBot 用户"]},
-            content,
-        )
-        self.assertNotIn("820002", repr(content))
+        assert {"tag": "blockquote", "children": ["@OneBot 用户"]} in content
+        assert "820002" not in repr(content)
 
     async def test_at_lookups_run_with_bounded_concurrency(self) -> None:
         active = 0
@@ -171,8 +170,8 @@ class OneBotForwardPageTests(unittest.IsolatedAsyncioTestCase):
 
         await builder.create("root")
 
-        self.assertGreater(maximum, 1)
-        self.assertLessEqual(maximum, 8)
+        assert maximum > 1
+        assert maximum <= 8
 
     async def test_at_lookup_skips_messages_beyond_page_limit(self) -> None:
         gateway = SimpleNamespace(get_stranger_info=AsyncMock())
@@ -193,7 +192,7 @@ class OneBotForwardPageTests(unittest.IsolatedAsyncioTestCase):
             depth=1,
         )
 
-        self.assertEqual(nodes, [builder._quote("[合并转发消息过多，后续内容已省略]")])
+        assert nodes == [builder._quote("[合并转发消息过多，后续内容已省略]")]
         gateway.get_stranger_info.assert_not_awaited()
 
     async def test_media_rejects_http_url_without_host(self) -> None:
@@ -204,7 +203,7 @@ class OneBotForwardPageTests(unittest.IsolatedAsyncioTestCase):
 
         node = await builder._media_node("image", {"url": "https:///image.png"})
 
-        self.assertEqual(node, builder._quote("[图片无法读取]"))
+        assert node == builder._quote("[图片无法读取]")
 
     async def test_fourth_level_is_not_requested(self) -> None:
         gateway = SimpleNamespace(
@@ -231,35 +230,33 @@ class OneBotForwardPageTests(unittest.IsolatedAsyncioTestCase):
         )
 
         root_page = await builder.create("root")
-        self.assertEqual(root_page.url, "https://telegra.ph/root")
+        assert root_page.url == "https://telegra.ph/root"
 
-        self.assertEqual(
-            [call.args[0] for call in gateway.get_forward_messages.await_args_list],
-            ["root", "level-2", "level-3"],
-        )
-        self.assertEqual(telegraph.create_page.await_count, 3)
+        assert [
+            call.args[0] for call in gateway.get_forward_messages.await_args_list
+        ] == ["root", "level-2", "level-3"]
+        assert telegraph.create_page.await_count == 3
         level_3_content = telegraph.create_page.await_args_list[0].args[1]
         level_2_content = telegraph.create_page.await_args_list[1].args[1]
         root_content = telegraph.create_page.await_args_list[2].args[1]
-        self.assertIn(UNSUPPORTED_FORWARD, repr(level_3_content))
-        self.assertNotIn("level-4", repr(level_3_content))
-        self.assertIn(
-            {
-                "tag": "blockquote",
-                "children": [
-                    {
-                        "tag": "a",
-                        "attrs": {"href": "https://telegra.ph/level-3"},
-                        "children": [TelegraphPageRef(
+        assert UNSUPPORTED_FORWARD in repr(level_3_content)
+        assert "level-4" not in repr(level_3_content)
+        assert {
+            "tag": "blockquote",
+            "children": [
+                {
+                    "tag": "a",
+                    "attrs": {"href": "https://telegra.ph/level-3"},
+                    "children": [
+                        TelegraphPageRef(
                             title=telegraph.create_page.await_args_list[0].args[0],
                             url="https://telegra.ph/level-3",
-                        ).title],
-                    }
-                ],
-            },
-            level_2_content,
-        )
-        self.assertIn("https://telegra.ph/level-2", repr(root_content))
+                        ).title
+                    ],
+                }
+            ],
+        } in level_2_content
+        assert "https://telegra.ph/level-2" in repr(root_content)
 
     async def test_repeated_nested_forward_reuses_page(self) -> None:
         gateway = SimpleNamespace(
@@ -296,12 +293,11 @@ class OneBotForwardPageTests(unittest.IsolatedAsyncioTestCase):
 
         await builder.create("root")
 
-        self.assertEqual(
-            [call.args[0] for call in gateway.get_forward_messages.await_args_list],
-            ["root", "shared"],
-        )
+        assert [
+            call.args[0] for call in gateway.get_forward_messages.await_args_list
+        ] == ["root", "shared"]
         root_content = telegraph.create_page.await_args_list[1].args[1]
-        self.assertEqual(repr(root_content).count("https://telegra.ph/shared"), 2)
+        assert repr(root_content).count("https://telegra.ph/shared") == 2
 
     async def test_image_uses_original_media_url(self) -> None:
         media_url = "https://media.example/image"
@@ -333,10 +329,4 @@ class OneBotForwardPageTests(unittest.IsolatedAsyncioTestCase):
         await builder.create("root")
 
         content = telegraph.create_page.await_args.args[1]
-        self.assertIn(
-            {
-                "tag": "img",
-                "attrs": {"src": media_url},
-            },
-            content,
-        )
+        assert {"tag": "img", "attrs": {"src": media_url}} in content

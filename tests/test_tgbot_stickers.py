@@ -1,11 +1,11 @@
 import io
-import unittest
 from functools import partial
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 from PIL import Image
 from telegram import Message
 
@@ -15,7 +15,8 @@ from src.processing import ProcessingTask
 from src.tgbot.handlers import TGhandlers
 
 
-class TelegramStickerTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestTelegramSticker:
     def _webp(self) -> bytes:
         output = io.BytesIO()
         Image.new("RGBA", (16, 16), (0, 255, 0, 128)).save(output, format="WEBP")
@@ -54,12 +55,9 @@ class TelegramStickerTests(unittest.IsolatedAsyncioTestCase):
             ):
                 await handler._enqueue_media([message])
             task = submit.call_args.args[0]
-            self.assertIsInstance(task, ProcessingTask)
             assert isinstance(task, ProcessingTask)
-            self.assertIsInstance(task.run, partial)
             assert isinstance(task.run, partial)
             forwarded = task.run.args[0]
-            self.assertIsInstance(forwarded, TelegramMessage)
             assert isinstance(forwarded, TelegramMessage)
             return task, forwarded
         finally:
@@ -82,12 +80,12 @@ class TelegramStickerTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         task, message = await self._enqueue_sticker(sticker, self._webp())
-        self.assertEqual(message.media[0].kind, "image")
-        self.assertEqual(message.media[0].processing, "sticker_static")
-        self.assertEqual(message.reply_message_id, 9)
+        assert message.media[0].kind == "image"
+        assert message.media[0].processing == "sticker_static"
+        assert message.reply_message_id == 9
         await task.cleanup()
-        self.assertEqual(media_item_budget.used, initial_items)
-        self.assertEqual(media_queue_budget.used, initial_bytes)
+        assert media_item_budget.used == initial_items
+        assert media_queue_budget.used == initial_bytes
 
     async def test_full_processing_queue_releases_media_budgets(self) -> None:
         initial_items = media_item_budget.used
@@ -134,14 +132,14 @@ class TelegramStickerTests(unittest.IsolatedAsyncioTestCase):
                     return_value=True,
                 ),
                 patch("src.tgbot.handlers.media_processor.submit", return_value=False),
-                self.assertRaisesRegex(ValueError, "媒体处理队列已满"),
+                pytest.raises(ValueError, match="媒体处理队列已满"),
             ):
                 await handler._enqueue_media([message])
         finally:
             await handler.download_client.aclose()
 
-        self.assertEqual(media_item_budget.used, initial_items)
-        self.assertEqual(media_queue_budget.used, initial_bytes)
+        assert media_item_budget.used == initial_items
+        assert media_queue_budget.used == initial_bytes
 
     async def test_tgs_sticker_downloads_original_for_gif_conversion(self) -> None:
         sticker = SimpleNamespace(
@@ -159,7 +157,7 @@ class TelegramStickerTests(unittest.IsolatedAsyncioTestCase):
         )
         task, message = await self._enqueue_sticker(sticker, self._webp())
         sticker.get_file.assert_awaited_once()
-        self.assertEqual(message.media[0].processing, "sticker_tgs")
+        assert message.media[0].processing == "sticker_tgs"
         await task.cleanup()
 
     async def test_video_sticker_is_scheduled_for_gif_conversion(self) -> None:
@@ -177,10 +175,6 @@ class TelegramStickerTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         task, message = await self._enqueue_sticker(sticker, b"webm")
-        self.assertEqual(message.media[0].kind, "image")
-        self.assertEqual(message.media[0].processing, "sticker_video")
+        assert message.media[0].kind == "image"
+        assert message.media[0].processing == "sticker_video"
         await task.cleanup()
-
-
-if __name__ == "__main__":
-    unittest.main()

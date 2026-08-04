@@ -1,15 +1,16 @@
 import asyncio
-import unittest
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
+import pytest
 from fastapi import WebSocket
 
 from src.qbot import QGateway
 
 
-class QGatewayDeleteTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestQGatewayDelete:
     async def test_delete_message_uses_delete_msg_action(self) -> None:
         websocket = SimpleNamespace(send_json=AsyncMock())
         gateway = QGateway()
@@ -29,8 +30,8 @@ class QGatewayDeleteTests(unittest.IsolatedAsyncioTestCase):
         )
         await task
 
-        self.assertEqual(request["action"], "delete_msg")
-        self.assertEqual(request["params"], {"message_id": 123})
+        assert request["action"] == "delete_msg"
+        assert request["params"] == {"message_id": 123}
 
     async def test_get_group_member_info_uses_default_cache(self) -> None:
         websocket = SimpleNamespace(send_json=AsyncMock())
@@ -56,10 +57,10 @@ class QGatewayDeleteTests(unittest.IsolatedAsyncioTestCase):
         )
         member = await task
 
-        self.assertEqual(request["action"], "get_group_member_info")
-        self.assertEqual(request["params"], {"group_id": 123, "user_id": 456})
-        self.assertNotIn("no_cache", request["params"])
-        self.assertEqual(member["card"], "Group Card")
+        assert request["action"] == "get_group_member_info"
+        assert request["params"] == {"group_id": 123, "user_id": 456}
+        assert "no_cache" not in request["params"]
+        assert member["card"] == "Group Card"
 
     async def test_get_group_member_info_can_bypass_cache(self) -> None:
         websocket = SimpleNamespace(send_json=AsyncMock())
@@ -82,11 +83,12 @@ class QGatewayDeleteTests(unittest.IsolatedAsyncioTestCase):
         )
         await task
 
-        self.assertEqual(request["action"], "get_group_member_info")
-        self.assertEqual(
-            request["params"],
-            {"group_id": 123, "user_id": 456, "no_cache": True},
-        )
+        assert request["action"] == "get_group_member_info"
+        assert request["params"] == {
+            "group_id": 123,
+            "user_id": 456,
+            "no_cache": True,
+        }
 
     async def test_get_group_member_list_always_bypasses_cache(self) -> None:
         websocket = SimpleNamespace(send_json=AsyncMock())
@@ -114,12 +116,9 @@ class QGatewayDeleteTests(unittest.IsolatedAsyncioTestCase):
         )
         members = await task
 
-        self.assertEqual(request["action"], "get_group_member_list")
-        self.assertEqual(
-            request["params"],
-            {"group_id": 810_001, "no_cache": True},
-        )
-        self.assertEqual(members[0]["user_id"], 810_002)
+        assert request["action"] == "get_group_member_list"
+        assert request["params"] == {"group_id": 810_001, "no_cache": True}
+        assert members[0]["user_id"] == 810_002
 
     async def test_get_stranger_info_uses_only_user_id(self) -> None:
         websocket = SimpleNamespace(send_json=AsyncMock())
@@ -140,9 +139,9 @@ class QGatewayDeleteTests(unittest.IsolatedAsyncioTestCase):
         )
         stranger = await task
 
-        self.assertEqual(request["action"], "get_stranger_info")
-        self.assertEqual(request["params"], {"user_id": 810_003})
-        self.assertEqual(stranger["nickname"], "Example Stranger")
+        assert request["action"] == "get_stranger_info"
+        assert request["params"] == {"user_id": 810_003}
+        assert stranger["nickname"] == "Example Stranger"
 
     async def test_get_group_info_uses_group_id(self) -> None:
         websocket = SimpleNamespace(send_json=AsyncMock())
@@ -166,12 +165,9 @@ class QGatewayDeleteTests(unittest.IsolatedAsyncioTestCase):
         )
         group = await task
 
-        self.assertEqual(request["action"], "get_group_info")
-        self.assertEqual(
-            request["params"],
-            {"group_id": 123_456_789, "no_cache": True},
-        )
-        self.assertEqual(group["group_name"], "Example OneBot Group")
+        assert request["action"] == "get_group_info"
+        assert request["params"] == {"group_id": 123_456_789, "no_cache": True}
+        assert group["group_name"] == "Example OneBot Group"
 
     async def test_get_group_list_always_bypasses_cache(self) -> None:
         websocket = SimpleNamespace(send_json=AsyncMock())
@@ -197,10 +193,6 @@ class QGatewayDeleteTests(unittest.IsolatedAsyncioTestCase):
         )
         groups = await task
 
-        self.assertEqual(request["action"], "get_group_list")
-        self.assertEqual(request["params"], {"no_cache": True})
-        self.assertEqual(groups[0]["group_id"], 123_456_789)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert request["action"] == "get_group_list"
+        assert request["params"] == {"no_cache": True}
+        assert groups[0]["group_id"] == 123_456_789

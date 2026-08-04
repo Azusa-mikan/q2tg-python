@@ -1,10 +1,11 @@
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
+import pytest_asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -14,8 +15,10 @@ from src.sql import Sql
 from src.tgbot.handlers import TGhandlers
 
 
-class TelegramGroupMemberTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
+@pytest.mark.asyncio
+class TestTelegramGroupMember:
+    @pytest_asyncio.fixture(autouse=True)
+    async def setup(self):
         self.directory = TemporaryDirectory()
         self.sql = Sql(Path(self.directory.name) / "telegram-group-member.sqlite3")
         await self.sql.load()
@@ -25,10 +28,11 @@ class TelegramGroupMemberTests(unittest.IsolatedAsyncioTestCase):
         self.gateway = SimpleNamespace(send_group_message=self.send_group_message)
         self.handler = TGhandlers()
         self.context = cast(ContextTypes.DEFAULT_TYPE, SimpleNamespace())
-
-    async def asyncTearDown(self) -> None:
-        await self.sql.close()
-        self.directory.cleanup()
+        try:
+            yield
+        finally:
+            await self.sql.close()
+            self.directory.cleanup()
 
     async def _receive(self, message: SimpleNamespace) -> SendTask:
         update = cast(Update, SimpleNamespace(effective_message=message))
@@ -40,10 +44,9 @@ class TelegramGroupMemberTests(unittest.IsolatedAsyncioTestCase):
             await self.handler.receive_group_member(update, self.context)
         task = await self.bus.onebot_event_queue.get()
         self.bus.onebot_event_queue.task_done()
-        self.assertIsInstance(task, SendTask)
         assert isinstance(task, SendTask)
-        self.assertIs(task.target, SendTarget.ONEBOT)
-        self.assertIs(task.lane, SendLane.EVENT)
+        assert task.target is SendTarget.ONEBOT
+        assert task.lane is SendLane.EVENT
         return task
 
     async def test_new_members_are_sent_in_one_message(self) -> None:
@@ -109,7 +112,7 @@ class TelegramGroupMemberTests(unittest.IsolatedAsyncioTestCase):
         ):
             await self.handler.receive_group_member(update, self.context)
 
-        self.assertTrue(self.bus.onebot_event_queue.empty())
+        assert self.bus.onebot_event_queue.empty()
 
     async def test_event_is_dropped_if_forwarding_is_disabled_while_queued(self) -> None:
         task = await self._receive(
@@ -125,7 +128,3 @@ class TelegramGroupMemberTests(unittest.IsolatedAsyncioTestCase):
             await task.send()
 
         self.send_group_message.assert_not_awaited()
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -1,4 +1,3 @@
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -6,6 +5,8 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
+import pytest_asyncio
 from telegram import LinkPreviewOptions
 from telegram.ext import ExtBot
 
@@ -15,8 +16,9 @@ from src.qbot import QGateway, receive_onebot_event
 from src.sql import Sql
 
 
-class OneBotPokeTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
+class TestOneBotPoke:
+    @pytest_asyncio.fixture(autouse=True)
+    async def setup_database(self):
         self.directory = TemporaryDirectory()
         self.sql = Sql(Path(self.directory.name) / "poke.sqlite3")
         await self.sql.load()
@@ -38,10 +40,11 @@ class OneBotPokeTests(unittest.IsolatedAsyncioTestCase):
             QGateway,
             SimpleNamespace(get_group_member_info=self.get_group_member_info),
         )
-
-    async def asyncTearDown(self) -> None:
-        await self.sql.close()
-        self.directory.cleanup()
+        try:
+            yield
+        finally:
+            await self.sql.close()
+            self.directory.cleanup()
 
     async def _send_poke(self, event: dict) -> SendTask:
         with (
@@ -51,12 +54,12 @@ class OneBotPokeTests(unittest.IsolatedAsyncioTestCase):
             await receive_onebot_event(event, self.bot, self.client)
         task = await self.bus.telegram_event_queue.get()
         self.bus.telegram_event_queue.task_done()
-        self.assertIsInstance(task, SendTask)
         assert isinstance(task, SendTask)
-        self.assertIs(task.target, SendTarget.TELEGRAM)
-        self.assertIs(task.lane, SendLane.EVENT)
+        assert task.target is SendTarget.TELEGRAM
+        assert task.lane is SendLane.EVENT
         return task
 
+    @pytest.mark.asyncio
     async def test_poke_sends_names_and_ids(self) -> None:
         task = await self._send_poke(
             {
@@ -87,6 +90,7 @@ class OneBotPokeTests(unittest.IsolatedAsyncioTestCase):
         self.get_group_member_info.assert_any_await(123, 101)
         self.get_group_member_info.assert_any_await(123, 102)
 
+    @pytest.mark.asyncio
     async def test_poke_hides_ids_when_disabled(self) -> None:
         await self.sql.set_id_show_enabled(-100123, False)
         task = await self._send_poke(
@@ -112,6 +116,7 @@ class OneBotPokeTests(unittest.IsolatedAsyncioTestCase):
             link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
+    @pytest.mark.asyncio
     async def test_poke_self_uses_self_as_target(self) -> None:
         task = await self._send_poke(
             {
@@ -137,6 +142,7 @@ class OneBotPokeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.get_group_member_info.assert_awaited_once_with(123, 101)
 
+    @pytest.mark.asyncio
     async def test_other_notify_subtype_is_ignored(self) -> None:
         with patch("src.qbot.message_bus", self.bus):
             await receive_onebot_event(
@@ -149,8 +155,9 @@ class OneBotPokeTests(unittest.IsolatedAsyncioTestCase):
                 self.bot,
                 self.client,
             )
-        self.assertTrue(self.bus.telegram_event_queue.empty())
+        assert self.bus.telegram_event_queue.empty()
 
+    @pytest.mark.asyncio
     async def test_malformed_poke_is_not_queued(self) -> None:
         with (
             patch("src.qbot.message_bus", self.bus),
@@ -170,9 +177,5 @@ class OneBotPokeTests(unittest.IsolatedAsyncioTestCase):
                 self.bot,
                 self.client,
             )
-        self.assertTrue(self.bus.telegram_event_queue.empty())
+        assert self.bus.telegram_event_queue.empty()
         warning.assert_called_once()
-
-
-if __name__ == "__main__":
-    unittest.main()

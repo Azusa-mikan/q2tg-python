@@ -1,7 +1,7 @@
-import unittest
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi import WebSocket, WebSocketDisconnect
 
 from src.messages import SendLane, SendTarget
@@ -19,7 +19,8 @@ class FakeWebSocket:
         raise WebSocketDisconnect()
 
 
-class WebSocketLifecycleTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestWebSocketLifecycle:
     async def test_ptb_runs_only_during_snowluma_connection(self) -> None:
         websocket = FakeWebSocket()
         onebot_download_client = AsyncMock()
@@ -40,29 +41,19 @@ class WebSocketLifecycleTests(unittest.IsolatedAsyncioTestCase):
         ):
             await snowluma_ws(cast(WebSocket, websocket))
 
-        self.assertTrue(websocket.accepted)
+        assert websocket.accepted
         run.assert_awaited_once_with()
         stop.assert_awaited_once_with()
-        self.assertEqual(consume.call_count, 6)
+        assert consume.call_count == 6
         for target in SendTarget:
             for lane in SendLane:
                 consume.assert_any_call(target, lane)
-        self.assertEqual(stop_consumer.await_count, 3)
+        assert stop_consumer.await_count == 3
         for lane in SendLane:
             stop_consumer.assert_any_await(SendTarget.TELEGRAM, lane)
         shutdown.assert_awaited_once_with()
-        self.assertEqual(client.call_count, 2)
-        self.assertEqual(
-            client.call_args_list[0].kwargs["proxy"],
-            "http://127.0.0.1:8080",
-        )
-        self.assertEqual(
-            client.call_args_list[1].kwargs["proxy"],
-            "socks5://127.0.0.1:1080",
-        )
+        assert client.call_count == 2
+        assert client.call_args_list[0].kwargs["proxy"] == "http://127.0.0.1:8080"
+        assert client.call_args_list[1].kwargs["proxy"] == "socks5://127.0.0.1:1080"
         onebot_download_client.aclose.assert_awaited_once_with()
         telegram_download_client.aclose.assert_awaited_once_with()
-
-
-if __name__ == "__main__":
-    unittest.main()

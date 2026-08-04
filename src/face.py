@@ -3,6 +3,8 @@ from typing import Any
 from telegram import Bot
 from telegram.helpers import escape_markdown
 
+from src.runtime_events import emit_runtime_event
+
 _SUPER_FACE_PACKS = {
     "qlottie_2": "364 362 397 396 360 361 363 365 367".split(),  # noqa: SIM905
     "qlottie_3": "413 405 404 406 411 407 408 412 409".split(),  # noqa: SIM905
@@ -132,6 +134,7 @@ def render_onebot_face(face_id: object) -> str:
     channel_message_id = OneBot_Face_Map.get(face_id)
     if channel_message_id is None:
         return label
+    emit_runtime_event("capability.succeeded", "onebot.face.qface")
     return f"[{label}](https://t.me/qq_face/{channel_message_id})"
 
 

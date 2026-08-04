@@ -1,5 +1,4 @@
 import asyncio
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -7,6 +6,8 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
+import pytest_asyncio
 from telegram import LinkPreviewOptions
 from telegram.ext import ExtBot
 
@@ -16,8 +17,9 @@ from src.qbot import receive_onebot_event
 from src.sql import Sql
 
 
-class OneBotRecallTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
+class TestOneBotRecall:
+    @pytest_asyncio.fixture(autouse=True)
+    async def setup_database(self):
         self.directory = TemporaryDirectory()
         self.sql = Sql(Path(self.directory.name) / "recall.sqlite3")
         await self.sql.load()
@@ -29,15 +31,17 @@ class OneBotRecallTests(unittest.IsolatedAsyncioTestCase):
             SimpleNamespace(delete_messages=self.delete_messages),
         )
         self.client = cast(httpx.AsyncClient, SimpleNamespace())
-
-    async def asyncTearDown(self) -> None:
-        await self.sql.close()
-        self.directory.cleanup()
+        try:
+            yield
+        finally:
+            await self.sql.close()
+            self.directory.cleanup()
 
     async def _receive_recall(self, event: dict) -> None:
         with patch("src.qbot.message_bus", self.bus):
             await receive_onebot_event(event, self.bot, self.client)
 
+    @pytest.mark.asyncio
     async def test_group_recall_deletes_all_mapped_telegram_messages(self) -> None:
         message_id = -1001
         await self.sql.set_message_mapping(
@@ -58,16 +62,15 @@ class OneBotRecallTests(unittest.IsolatedAsyncioTestCase):
 
         task = await self.bus.telegram_event_queue.get()
         try:
-            self.assertIsInstance(task, SendTask)
             assert isinstance(task, SendTask)
-            self.assertIs(task.target, SendTarget.TELEGRAM)
-            self.assertEqual(task.max_attempts, 3)
+            assert task.target is SendTarget.TELEGRAM
+            assert task.max_attempts == 3
             with patch("src.forwarding.sql", self.sql):
                 await task.send()
         finally:
             self.bus.telegram_event_queue.task_done()
 
-        self.assertEqual(self.delete_messages.await_count, 2)
+        assert self.delete_messages.await_count == 2
         self.delete_messages.assert_any_await(
             chat_id=-100123,
             message_ids=tuple(range(1, 101)),
@@ -77,6 +80,7 @@ class OneBotRecallTests(unittest.IsolatedAsyncioTestCase):
             message_ids=(101,),
         )
 
+    @pytest.mark.asyncio
     async def test_group_recall_without_mapping_does_nothing(self) -> None:
         await self._receive_recall(
             {
@@ -100,6 +104,7 @@ class OneBotRecallTests(unittest.IsolatedAsyncioTestCase):
         self.delete_messages.assert_not_awaited()
         warning.assert_called_once()
 
+    @pytest.mark.asyncio
     async def test_malformed_group_recall_is_not_queued(self) -> None:
         with patch("src.qbot.qlog.warning") as warning:
             await self._receive_recall(
@@ -111,9 +116,10 @@ class OneBotRecallTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-        self.assertTrue(self.bus.telegram_event_queue.empty())
+        assert self.bus.telegram_event_queue.empty()
         warning.assert_called_once()
 
+    @pytest.mark.asyncio
     async def test_other_notice_is_ignored(self) -> None:
         await self._receive_recall(
             {
@@ -122,8 +128,9 @@ class OneBotRecallTests(unittest.IsolatedAsyncioTestCase):
                 "group_id": 123,
             }
         )
-        self.assertTrue(self.bus.telegram_event_queue.empty())
+        assert self.bus.telegram_event_queue.empty()
 
+    @pytest.mark.asyncio
     async def test_recall_waits_for_inflight_negative_message_id(self) -> None:
         message_id = -1001
         send_started = asyncio.Event()
@@ -173,7 +180,7 @@ class OneBotRecallTests(unittest.IsolatedAsyncioTestCase):
                     self.bot,
                     self.client,
                 )
-                self.assertTrue(self.bus.telegram_event_queue.empty())
+                assert self.bus.telegram_event_queue.empty()
                 allow_send.set()
                 await self.bus.join(SendTarget.TELEGRAM, SendLane.MESSAGE)
                 await self.bus.join(SendTarget.TELEGRAM, SendLane.EVENT)
@@ -188,9 +195,8 @@ class OneBotRecallTests(unittest.IsolatedAsyncioTestCase):
             )
 
         mapping = await self.sql.get_tg_message(123, message_id)
-        self.assertIsNotNone(mapping)
         assert mapping is not None
-        self.assertEqual(mapping.tg_message_ids, (88,))
+        assert mapping.tg_message_ids == (88,)
         self.bot.send_message.assert_awaited_once_with(
             chat_id=-100123,
             text="User[101]:\n123",
@@ -201,7 +207,3 @@ class OneBotRecallTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-100123,
             message_ids=(88,),
         )
-
-
-if __name__ == "__main__":
-    unittest.main()

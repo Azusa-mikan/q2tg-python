@@ -1,12 +1,14 @@
 import asyncio
-import unittest
 from unittest.mock import AsyncMock, Mock
+
+import pytest
 
 from src.bus import MessageBus
 from src.messages import FailureAction, SendLane, SendTarget, SendTask
 
 
-class MessageBusRetryTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestMessageBusRetry:
     async def _run_until_idle(self, bus: MessageBus, target: SendTarget) -> None:
         dispatcher = asyncio.create_task(bus.dispatch_retries())
         consumer = asyncio.create_task(bus.consume(target))
@@ -25,9 +27,9 @@ class MessageBusRetryTests(unittest.IsolatedAsyncioTestCase):
         await bus.put(onebot_task)
         await bus.put(telegram_task)
 
-        self.assertIs(await bus.onebot_queue.get(), onebot_task)
+        assert await bus.onebot_queue.get() is onebot_task
         bus.onebot_queue.task_done()
-        self.assertIs(await bus.telegram_queue.get(), telegram_task)
+        assert await bus.telegram_queue.get() is telegram_task
         bus.telegram_queue.task_done()
 
     async def test_lanes_are_isolated_for_the_same_target(self) -> None:
@@ -48,11 +50,11 @@ class MessageBusRetryTests(unittest.IsolatedAsyncioTestCase):
         await bus.put(event)
         await bus.put(system)
 
-        self.assertIs(await bus.telegram_queue.get(), message)
+        assert await bus.telegram_queue.get() is message
         bus.telegram_queue.task_done()
-        self.assertIs(await bus.telegram_event_queue.get(), event)
+        assert await bus.telegram_event_queue.get() is event
         bus.telegram_event_queue.task_done()
-        self.assertIs(await bus.telegram_system_queue.get(), system)
+        assert await bus.telegram_system_queue.get() is system
         bus.telegram_system_queue.task_done()
 
     async def test_retry_uses_separate_queue_and_succeeds_on_third_attempt(self) -> None:
@@ -72,7 +74,7 @@ class MessageBusRetryTests(unittest.IsolatedAsyncioTestCase):
 
         await self._run_until_idle(bus, SendTarget.ONEBOT)
 
-        self.assertEqual(send.await_count, 3)
+        assert send.await_count == 3
         exhausted.assert_not_awaited()
         finalize.assert_awaited_once_with()
 
@@ -94,7 +96,7 @@ class MessageBusRetryTests(unittest.IsolatedAsyncioTestCase):
 
         await self._run_until_idle(bus, SendTarget.TELEGRAM)
 
-        self.assertEqual(send.await_count, 3)
+        assert send.await_count == 3
         exhausted.assert_awaited_once_with(error)
         finalize.assert_awaited_once_with()
 
@@ -125,7 +127,7 @@ class MessageBusRetryTests(unittest.IsolatedAsyncioTestCase):
 
         await self._run_until_idle(bus, SendTarget.ONEBOT)
 
-        self.assertEqual(order, ["A1", "B", "A2"])
+        assert order == ["A1", "B", "A2"]
 
     async def test_defer_does_not_count_failure_or_finalize(self) -> None:
         bus = MessageBus()
@@ -141,8 +143,8 @@ class MessageBusRetryTests(unittest.IsolatedAsyncioTestCase):
 
         await bus.consume(SendTarget.ONEBOT)
 
-        self.assertEqual(task.failures, 0)
-        self.assertIs(await bus.retry_queue.get(), task)
+        assert task.failures == 0
+        assert await bus.retry_queue.get() is task
         bus.retry_queue.task_done()
         finalize.assert_not_awaited()
 
@@ -160,7 +162,3 @@ class MessageBusRetryTests(unittest.IsolatedAsyncioTestCase):
         await self._run_until_idle(bus, SendTarget.ONEBOT)
 
         failed.assert_awaited_once_with(error)
-
-
-if __name__ == "__main__":
-    unittest.main()

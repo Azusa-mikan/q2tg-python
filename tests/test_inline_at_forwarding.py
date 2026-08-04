@@ -1,14 +1,16 @@
-import unittest
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from src.forwarding import forward_telegram_to_onebot
 from src.messages import TelegramMessage
 from src.qbot import QGateway
 
 
-class InlineAtForwardingTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestInlineAtForwarding:
     async def test_inline_at_is_sent_as_onebot_at_segment(self) -> None:
         message = TelegramMessage(
             message_ids=(860_001,),
@@ -45,7 +47,3 @@ class InlineAtForwardingTests(unittest.IsolatedAsyncioTestCase):
                 {"type": "at", "data": {"qq": "860004"}},
             ],
         )
-
-
-if __name__ == "__main__":
-    unittest.main()

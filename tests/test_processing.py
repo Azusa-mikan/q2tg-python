@@ -1,13 +1,15 @@
 import asyncio
-import unittest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from src.bus import MessageBus
 from src.messages import SendTarget, SendTask
 from src.processing import MediaProcessor, ProcessingTask
 
 
-class MediaProcessorTests(unittest.IsolatedAsyncioTestCase):
+@pytest.mark.asyncio
+class TestMediaProcessor:
     async def test_submit_is_bounded_and_non_blocking(self) -> None:
         processor = MediaProcessor(maxsize=1)
         first_cleanup = AsyncMock()
@@ -15,8 +17,8 @@ class MediaProcessorTests(unittest.IsolatedAsyncioTestCase):
         first = ProcessingTask(run=AsyncMock(), cleanup=first_cleanup)
         second = ProcessingTask(run=AsyncMock(), cleanup=second_cleanup)
 
-        self.assertTrue(processor.submit(first))
-        self.assertFalse(processor.submit(second))
+        assert processor.submit(first)
+        assert not processor.submit(second)
 
         await processor.close()
         first_cleanup.assert_awaited_once_with()
@@ -45,10 +47,10 @@ class MediaProcessorTests(unittest.IsolatedAsyncioTestCase):
         try:
             await first_started.wait()
             await asyncio.sleep(0)
-            self.assertFalse(second_started.is_set())
+            assert not second_started.is_set()
             release_first.set()
             await processor.queue.join()
-            self.assertTrue(second_started.is_set())
+            assert second_started.is_set()
         finally:
             worker.cancel()
             await asyncio.gather(worker, return_exceptions=True)
@@ -99,7 +101,7 @@ class MediaProcessorTests(unittest.IsolatedAsyncioTestCase):
             await bus.put(SendTask(target=SendTarget.ONEBOT, send=send))
             await bus.join(SendTarget.ONEBOT)
             send.assert_awaited_once_with()
-            self.assertFalse(release_processing.is_set())
+            assert not release_processing.is_set()
         finally:
             release_processing.set()
             await processor.queue.join()
@@ -110,7 +112,3 @@ class MediaProcessorTests(unittest.IsolatedAsyncioTestCase):
                 send_worker,
                 return_exceptions=True,
             )
-
-
-if __name__ == "__main__":
-    unittest.main()

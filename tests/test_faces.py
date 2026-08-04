@@ -1,9 +1,9 @@
-import unittest
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import pytest
 from telegram import Bot
 from telegram.constants import ParseMode
 from telegram.ext import ExtBot
@@ -18,8 +18,12 @@ from src.forwarding import forward_onebot_to_telegram, onebot_message_text
 from src.messages import OneBotMessage
 
 
-class FaceTests(unittest.IsolatedAsyncioTestCase):
-    def setUp(self) -> None:
+@pytest.mark.asyncio
+class TestFaces:
+    @pytest.fixture(autouse=True)
+    def clear_sticker_cache(self):
+        _STICKER_PACK_CACHE.clear()
+        yield
         _STICKER_PACK_CACHE.clear()
 
     async def test_face_preserves_segment_order(self) -> None:
@@ -33,23 +37,20 @@ class FaceTests(unittest.IsolatedAsyncioTestCase):
             markdown_v2=True,
         )
 
-        self.assertEqual(
-            text,
-            r"测试文本 [\[/小纠结\]](https://t.me/qq_face/89) 测试文本",
-        )
+        assert text == r"测试文本 [\[/小纠结\]](https://t.me/qq_face/89) 测试文本"
 
     async def test_face_without_channel_mapping_falls_back_to_label(self) -> None:
-        self.assertEqual(render_onebot_face("999999"), r"\[表情:999999\]")
+        assert render_onebot_face("999999") == r"\[表情:999999\]"
 
     async def test_generated_face_name_text_is_removed_for_all_faces(self) -> None:
-        self.assertEqual(
+        assert (
             normalize_onebot_face_message(
                 [
                     {"type": "face", "data": {"id": "421"}},
                     {"type": "text", "data": {"text": "[大火车]"}},
                 ]
-            ),
-            [{"type": "face", "data": {"id": "421"}}],
+            )
+            == [{"type": "face", "data": {"id": "421"}}]
         )
 
     async def test_generated_face_name_normalization_keeps_real_mixed_text(self) -> None:
@@ -57,7 +58,7 @@ class FaceTests(unittest.IsolatedAsyncioTestCase):
             {"type": "face", "data": {"id": "429"}},
             {"type": "text", "data": {"text": "测试"}},
         ]
-        self.assertIs(normalize_onebot_face_message(message), message)
+        assert normalize_onebot_face_message(message) is message
 
     async def test_unmapped_super_face_keeps_hyperlink_without_duplicate_text(
         self,
@@ -72,10 +73,7 @@ class FaceTests(unittest.IsolatedAsyncioTestCase):
             123,
             markdown_v2=True,
         )
-        self.assertEqual(
-            text,
-            r"[\[/大火车\]](https://t.me/qq_face/411)",
-        )
+        assert text == r"[\[/大火车\]](https://t.me/qq_face/411)"
 
     async def test_super_face_sticker_pack_is_cached(self) -> None:
         stickers = [SimpleNamespace(file_id=f"sticker-{index}") for index in range(9)]
@@ -86,8 +84,8 @@ class FaceTests(unittest.IsolatedAsyncioTestCase):
         first = await onebot_super_face_file_id(cast(Bot, bot), "429")
         second = await onebot_super_face_file_id(cast(Bot, bot), "432")
 
-        self.assertEqual(first, "sticker-0")
-        self.assertEqual(second, "sticker-8")
+        assert first == "sticker-0"
+        assert second == "sticker-8"
         bot.get_sticker_set.assert_awaited_once_with("qq_snake")
 
     async def test_face_message_is_sent_as_markdown_v2(self) -> None:
@@ -133,15 +131,12 @@ class FaceTests(unittest.IsolatedAsyncioTestCase):
                     client,
                 )
 
-        self.assertEqual(
-            bot.send_message.await_args.kwargs["text"],
-            "Sender\\_Name:\n测试\\_文本 "
-            r"[\[/小纠结\]](https://t.me/qq_face/89)",
+        assert (
+            bot.send_message.await_args.kwargs["text"]
+            == "Sender\\_Name:\n测试\\_文本 "
+            r"[\[/小纠结\]](https://t.me/qq_face/89)"
         )
-        self.assertEqual(
-            bot.send_message.await_args.kwargs["parse_mode"],
-            ParseMode.MARKDOWN_V2,
-        )
+        assert bot.send_message.await_args.kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
 
     async def test_single_super_face_is_sent_as_sticker(self) -> None:
         stickers = [SimpleNamespace(file_id=f"sticker-{index}") for index in range(9)]
@@ -200,10 +195,6 @@ class FaceTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-789,
             sticker="sticker-0",
         )
-        self.assertEqual(message.tg_message_ids, [201, 202])
+        assert message.tg_message_ids == [201, 202]
         assert set_mapping.await_args is not None
-        self.assertEqual(set_mapping.await_args.kwargs["tg_message_ids"], (201, 202))
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert set_mapping.await_args.kwargs["tg_message_ids"] == (201, 202)
