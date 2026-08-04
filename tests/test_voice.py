@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pilk
-from telegram import Message
+from telegram import LinkPreviewOptions, Message
 from telegram.ext import ExtBot
 
 from src.audio import normalize_onebot_record
@@ -137,6 +137,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-456,
             text="OneBot User[1]:\n[语音无法转发：缺少可用的 HTTP(S) 下载地址]",
             reply_parameters=None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
     async def test_voice_caption_over_limit_is_sent_as_retry_safe_text(self) -> None:

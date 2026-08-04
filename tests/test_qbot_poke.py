@@ -6,6 +6,7 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from telegram import LinkPreviewOptions
 from telegram.ext import ExtBot
 
 from src.bus import MessageBus
@@ -80,6 +81,8 @@ class OneBotPokeTests(unittest.IsolatedAsyncioTestCase):
                 "测试用户[101] 揉了揉 "
                 "测试机器人[102] 的脸，怎么了？"
             ),
+            disable_notification=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         self.get_group_member_info.assert_any_await(123, 101)
         self.get_group_member_info.assert_any_await(123, 102)
@@ -105,6 +108,8 @@ class OneBotPokeTests(unittest.IsolatedAsyncioTestCase):
         self.send_message.assert_awaited_once_with(
             chat_id=-100123,
             text="测试用户 揉了揉 测试机器人 的脸，怎么了？",
+            disable_notification=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
     async def test_poke_self_uses_self_as_target(self) -> None:
@@ -127,6 +132,8 @@ class OneBotPokeTests(unittest.IsolatedAsyncioTestCase):
         self.send_message.assert_awaited_once_with(
             chat_id=-100123,
             text="测试用户[101] 戳了戳 自己 的脸",
+            disable_notification=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         self.get_group_member_info.assert_awaited_once_with(123, 101)
 

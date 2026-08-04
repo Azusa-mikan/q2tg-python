@@ -6,6 +6,7 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from telegram import LinkPreviewOptions
 from telegram.ext import ExtBot
 
 from src.forwarding import (
@@ -362,6 +363,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-456,
             text="OneBot 用户:\nmessage",
             reply_parameters=None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
     async def test_disabled_id_show_keeps_real_sender_name(self) -> None:
@@ -389,6 +391,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-456,
             text="Named User:\nmessage",
             reply_parameters=None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
     async def test_enabled_id_show_appends_user_id_to_real_sender_name(self) -> None:
@@ -416,6 +419,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-456,
             text="Example User[234]:\nmessage",
             reply_parameters=None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
     async def test_enabled_id_show_does_not_duplicate_fallback_user_id(self) -> None:
@@ -444,6 +448,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-456,
             text="OneBot 用户[234]:\nmessage",
             reply_parameters=None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
     async def test_onebot_non_mp4_video_is_sent_as_document(self) -> None:
@@ -813,6 +818,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-456,
             text="OneBot User[1]:\n[视频无法转发：缺少可用的 HTTP(S) 下载地址]",
             reply_parameters=None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         mapping = await self.database.get_tg_message(123, 103)
         self.assertIsNotNone(mapping)

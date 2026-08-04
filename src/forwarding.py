@@ -19,6 +19,7 @@ from telegram import (
     InputFile,
     InputMediaDocument,
     InputMediaPhoto,
+    LinkPreviewOptions,
     ReplyParameters,
 )
 from telegram.constants import ParseMode
@@ -829,7 +830,12 @@ async def forward_onebot_group_ban_to_telegram(
         text = f"{user} 被管理员 {operator} 解除禁言"
     else:
         text = f"{user} 被管理员 {operator} 禁言 {format_duration(event.duration)}"
-    await bot.send_message(chat_id=tg_chat_id, text=text)
+    await bot.send_message(
+        chat_id=tg_chat_id,
+        text=text,
+        disable_notification=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
 
 
 def onebot_group_ban_task(
@@ -867,7 +873,12 @@ async def forward_onebot_group_member_to_telegram(
     )
     user = _event_member_text(name, event.user_id, show_id=show_id)
     action = "加入群聊" if event.joined else "退出群聊"
-    await bot.send_message(chat_id=tg_chat_id, text=f"{user} {action}")
+    await bot.send_message(
+        chat_id=tg_chat_id,
+        text=f"{user} {action}",
+        disable_notification=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
 
 
 def onebot_group_member_task(
@@ -915,6 +926,8 @@ async def forward_onebot_poke_to_telegram(
     await bot.send_message(
         chat_id=tg_chat_id,
         text=f"{user} {event.action} {target} {event.suffix}",
+        disable_notification=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 
@@ -1126,6 +1139,7 @@ async def _send_text_chunks(
             chat_id=group_id,
             text=chunks[index],
             reply_parameters=reply_parameters if index == 0 else None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
             **send_options,
         )
         msg.tg_message_ids.append(sent.message_id)
