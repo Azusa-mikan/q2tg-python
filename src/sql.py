@@ -24,7 +24,6 @@ from src.database_schema import (
 from src.sql_migrations import migrate_database
 
 MESSAGE_RETENTION = 30 * 24 * 60 * 60
-DATABASE_PATH = Path(__file__).parents[1] / "data" / "q2tg.db"
 
 ASYNC_DRIVERS = {
     "sqlite": "sqlite+aiosqlite",
@@ -67,6 +66,7 @@ class Sql:
         self._engine: AsyncEngine | None = None
         # SQLite 需要串行化 BEGIN IMMEDIATE；也避免单实例内冲突写入无谓重试。
         self._write_lock = asyncio.Lock()
+        self._is_sqlite = self._url.get_backend_name() == "sqlite"
 
     async def bind_group(self, q_group_id: int, tg_chat_id: int) -> None:
         """建立严格一对一的群绑定，已有冲突时拒绝静默覆盖。"""
@@ -116,7 +116,7 @@ class Sql:
             statement = sa.select(group_mappings.c.q_group_id).where(
                 group_mappings.c.tg_chat_id == tg_chat_id
             )
-            if self._url.get_backend_name() != "sqlite":
+            if not self._is_sqlite:
                 statement = statement.with_for_update()
             q_group_id = (await connection.execute(statement)).scalar_one_or_none()
             if q_group_id is not None:
@@ -128,24 +128,18 @@ class Sql:
             return q_group_id
 
     async def get_tg_group(self, q_group_id: int) -> int | None:
-        async with self._connection() as connection:
-            return (
-                await connection.execute(
-                    sa.select(group_mappings.c.tg_chat_id).where(
-                        group_mappings.c.q_group_id == q_group_id
-                    )
-                )
-            ).scalar_one_or_none()
+        return await self._lookup_group_column(
+            group_mappings.c.tg_chat_id,
+            group_mappings.c.q_group_id,
+            q_group_id,
+        )
 
     async def get_q_group(self, tg_chat_id: int) -> int | None:
-        async with self._connection() as connection:
-            return (
-                await connection.execute(
-                    sa.select(group_mappings.c.q_group_id).where(
-                        group_mappings.c.tg_chat_id == tg_chat_id
-                    )
-                )
-            ).scalar_one_or_none()
+        return await self._lookup_group_column(
+            group_mappings.c.q_group_id,
+            group_mappings.c.tg_chat_id,
+            tg_chat_id,
+        )
 
     async def get_setting(self, key: str) -> str | None:
         """读取应用级持久化配置。"""
@@ -287,42 +281,22 @@ class Sql:
         q_group_id: int,
         q_message_id: int,
     ) -> MessageMapping | None:
-        statement = (
-            sa.select(message_mappings)
-            .join(
-                onebot_message_mappings,
-                onebot_message_mappings.c.mapping_id == message_mappings.c.id,
-            )
-            .where(
-                onebot_message_mappings.c.q_group_id == q_group_id,
-                onebot_message_mappings.c.q_message_id == q_message_id,
-                message_mappings.c.expires_at > time.time(),
-            )
+        return await self._lookup_message(
+            onebot_message_mappings,
+            onebot_message_mappings.c.q_group_id == q_group_id,
+            onebot_message_mappings.c.q_message_id == q_message_id,
         )
-        async with self._connection() as connection:
-            row = (await connection.execute(statement)).mappings().one_or_none()
-            return await self._mapping_from_row(connection, row)
 
     async def get_q_message(
         self,
         tg_chat_id: int,
         tg_message_id: int,
     ) -> MessageMapping | None:
-        statement = (
-            sa.select(message_mappings)
-            .join(
-                telegram_message_mappings,
-                telegram_message_mappings.c.mapping_id == message_mappings.c.id,
-            )
-            .where(
-                telegram_message_mappings.c.tg_chat_id == tg_chat_id,
-                telegram_message_mappings.c.tg_message_id == tg_message_id,
-                message_mappings.c.expires_at > time.time(),
-            )
+        return await self._lookup_message(
+            telegram_message_mappings,
+            telegram_message_mappings.c.tg_chat_id == tg_chat_id,
+            telegram_message_mappings.c.tg_message_id == tg_message_id,
         )
-        async with self._connection() as connection:
-            row = (await connection.execute(statement)).mappings().one_or_none()
-            return await self._mapping_from_row(connection, row)
 
     async def purge_expired(self) -> None:
         async with self._write_lock, self._transaction() as connection:
@@ -336,15 +310,15 @@ class Sql:
         """自动迁移 schema，并创建异步连接池。"""
         if self._engine is not None:
             raise RuntimeError("消息映射数据库已经加载")
-        if self._url.get_backend_name() == "sqlite" and self._url.database:
+        if self._is_sqlite and self._url.database:
             Path(self._url.database).parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(migrate_database, self._url)
         engine = create_async_engine(self._url, pool_pre_ping=True)
-        if self._url.get_backend_name() == "sqlite":
+        if self._is_sqlite:
             event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
         self._engine = engine
         try:
-            if self._url.get_backend_name() == "sqlite":
+            if self._is_sqlite:
                 async with engine.connect() as connection:
                     await connection.exec_driver_sql("PRAGMA foreign_keys = ON")
                     await connection.exec_driver_sql("PRAGMA synchronous = NORMAL")
@@ -361,6 +335,33 @@ class Sql:
         engine = self._engine
         self._engine = None
         await engine.dispose()
+
+    async def _lookup_group_column(
+        self,
+        select_column: sa.Column[int],
+        key_column: sa.Column[int],
+        key_value: int,
+    ) -> int | None:
+        async with self._connection() as connection:
+            return (
+                await connection.execute(
+                    sa.select(select_column).where(key_column == key_value)
+                )
+            ).scalar_one_or_none()
+
+    async def _lookup_message(
+        self,
+        side: sa.Table,
+        *conditions: sa.ColumnElement[bool],
+    ) -> MessageMapping | None:
+        statement = (
+            sa.select(message_mappings)
+            .join(side, side.c.mapping_id == message_mappings.c.id)
+            .where(*conditions, message_mappings.c.expires_at > time.time())
+        )
+        async with self._connection() as connection:
+            row = (await connection.execute(statement)).mappings().one_or_none()
+            return await self._mapping_from_row(connection, row)
 
     async def _set_group_flag(
         self,
@@ -434,7 +435,7 @@ class Sql:
     async def _transaction(self, *, immediate: bool = False) -> AsyncIterator[AsyncConnection]:
         engine = self._require_engine()
         async with engine.connect() as connection:
-            if immediate and self._url.get_backend_name() == "sqlite":
+            if immediate and self._is_sqlite:
                 await connection.exec_driver_sql("BEGIN IMMEDIATE")
                 try:
                     yield connection

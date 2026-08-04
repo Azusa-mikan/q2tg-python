@@ -19,6 +19,7 @@ from telegram import (
     InputFile,
     InputMediaDocument,
     InputMediaPhoto,
+    LinkPreviewOptions,
     ReplyParameters,
 )
 from telegram.constants import ParseMode
@@ -35,7 +36,13 @@ from src.face import (
     render_onebot_face,
 )
 from src.log import baselog
-from src.media import MediaFile, media_cache, media_queue_budget
+from src.media import (
+    MEDIA_SIZE_LIMIT,
+    MEDIA_SIZE_LIMIT_TEXT,
+    MediaFile,
+    media_cache,
+    media_queue_budget,
+)
 from src.messages import (
     ONEBOT_USER_NAME,
     FailureAction,
@@ -71,7 +78,7 @@ if TYPE_CHECKING:
     from src.qbot import QGateway
 
 PHOTO_LIMIT = 10_000_000
-ONEBOT_MEDIA_LIMIT = 20_000_000
+ONEBOT_MEDIA_LIMIT = MEDIA_SIZE_LIMIT
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 MAX_SEND_ATTEMPTS = 3
 TELEGRAM_VIDEO_LIMIT = 20_000_000
@@ -315,10 +322,10 @@ async def download_media(
                     content_length is not None
                     and int(content_length) > ONEBOT_MEDIA_LIMIT
                 ):
-                    raise MediaTooLargeError("OneBot 媒体超过 20 MB，无法转发")
+                    raise MediaTooLargeError(f"OneBot 媒体超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
                 async for chunk in response.aiter_bytes(DOWNLOAD_CHUNK_SIZE):
                     if media.size + len(chunk) > ONEBOT_MEDIA_LIMIT:
-                        raise MediaTooLargeError("OneBot 媒体超过 20 MB，无法转发")
+                        raise MediaTooLargeError(f"OneBot 媒体超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
                     media.write(chunk)
         except httpx.HTTPError:
             raise RuntimeError("OneBot 媒体下载失败") from None
@@ -368,6 +375,7 @@ async def forward_onebot_to_telegram(
     has_forwards = any(segment.get("type") == "forward" for segment in normalized_message)
     announcement = onebot_group_announcement(normalized_message)
     markdown_v2 = has_faces or has_forwards
+    parse_mode = ParseMode.MARKDOWN_V2 if markdown_v2 else None
     text = await onebot_message_text(
         normalized_message,
         msg.group_id,
@@ -435,76 +443,13 @@ async def forward_onebot_to_telegram(
             )
 
     if announcement is not None:
-        body, image_url = announcement
-        if msg.announcement_filename is None:
-            msg.announcement_filename = f"群公告 - {token_hex(8)}.md"
-        if not msg.tg_message_ids:
-            # 公告文件可能被下载和长期保存，正文作者永久隐藏数字 ID；Telegram
-            # caption 仍沿用上方按当前群 id_show 设置生成的 sender_name。
-            author = ONEBOT_USER_NAME if msg.sender_name_is_fallback else msg.sender_name
-            content = f"{author}:\n\n# 群公告\n\n{body}\n".encode()
-            sent = await bot.send_document(
-                chat_id=group_id,
-                document=InputFile(content, filename=msg.announcement_filename),
-                caption=f"{sender_name}:",
-                reply_parameters=reply_parameters,
-            )
-            msg.tg_message_ids.append(sent.message_id)
-        if image_url is not None and len(msg.tg_message_ids) == 1:
-            image = await download_image(
-                client,
-                image_url,
-                filename="群公告图片.jpg",
-            )
-            try:
-                upload = InputFile(
-                    image.file,
-                    filename=image.filename,
-                    read_file_handle=False,
-                )
-                image_reply = ReplyParameters(
-                    message_id=msg.tg_message_ids[0],
-                    allow_sending_without_reply=True,
-                )
-                if image.size <= PHOTO_LIMIT:
-                    sent = await bot.send_photo(
-                        chat_id=group_id,
-                        photo=upload,
-                        reply_parameters=image_reply,
-                    )
-                else:
-                    sent = await bot.send_document(
-                        chat_id=group_id,
-                        document=upload,
-                        reply_parameters=image_reply,
-                    )
-                msg.tg_message_ids.append(sent.message_id)
-            finally:
-                image.close()
+        await _forward_announcement(
+            msg, bot, client, group_id, announcement, sender_name, reply_parameters
+        )
     elif super_face_id is not None and not has_forwards:
-        sticker_file_id = await onebot_super_face_file_id(bot, super_face_id)
-        if sticker_file_id is not None:
-            if not msg.tg_message_ids:
-                sent_header = await bot.send_message(
-                    chat_id=group_id,
-                    text=f"{sender_name}:",
-                    reply_parameters=reply_parameters,
-                )
-                msg.tg_message_ids.append(sent_header.message_id)
-            sent_sticker = await bot.send_sticker(
-                chat_id=group_id,
-                sticker=sticker_file_id,
-            )
-            msg.tg_message_ids.append(sent_sticker.message_id)
-        else:
-            await _send_text_chunks(
-                msg,
-                bot,
-                group_id,
-                caption,
-                reply_parameters,
-                parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
-            )
+        await _forward_super_face(
+            msg, bot, group_id, super_face_id, sender_name, caption, reply_parameters, parse_mode
+        )
     elif not media:
         await _send_text_chunks(
             msg,
@@ -512,171 +457,20 @@ async def forward_onebot_to_telegram(
             group_id,
             caption,
             reply_parameters,
-            parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
+            parse_mode=parse_mode,
         )
     elif (
         msg.next_media_index == 0
         and 2 <= len(media) <= 10
         and all(kind == "image" for kind, _, _ in media)
     ):
-        media_caption, media_reply = await _prepare_media_caption(
-            msg,
-            bot,
-            group_id,
-            caption,
-            reply_parameters,
-            parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
+        await _forward_media_album(
+            msg, bot, client, group_id, media, caption, reply_parameters, parse_mode
         )
-        contents: list[MediaFile] = []
-        try:
-            for kind, url, filename in media:
-                contents.append(
-                    await download_media(
-                        client,
-                        url,
-                        filename=filename,
-                        kind=kind,
-                    )
-                )
-            as_animations = any(_is_gif(content) for content in contents)
-            as_photos = all(content.size <= PHOTO_LIMIT for content in contents)
-            album: list[InputMediaPhoto | InputMediaDocument] = []
-            if as_animations:
-                await _send_downloaded_media_individually(
-                    msg,
-                    bot,
-                    group_id,
-                    media,
-                    contents,
-                    media_caption,
-                    media_reply,
-                    ParseMode.MARKDOWN_V2 if markdown_v2 else None,
-                )
-            elif as_photos:
-                album = [
-                    InputMediaPhoto(
-                        media=InputFile(
-                            content.file,
-                            filename=filename,
-                            attach=True,
-                            read_file_handle=False,
-                        ),
-                        caption=media_caption if index == 0 else None,
-                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
-                        show_caption_above_media=index == 0,
-                    )
-                    for index, (content, (_, _, filename)) in enumerate(
-                        zip(contents, media, strict=True)
-                    )
-                ]
-            else:
-                album = [
-                    InputMediaDocument(
-                        media=InputFile(
-                            content.file,
-                            filename=filename,
-                            attach=True,
-                            read_file_handle=False,
-                        ),
-                        caption=media_caption if index == len(contents) - 1 else None,
-                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
-                    )
-                    for index, (content, (_, _, filename)) in enumerate(
-                        zip(contents, media, strict=True)
-                    )
-                ]
-            if not as_animations:
-                sent_messages = await bot.send_media_group(
-                    chat_id=group_id,
-                    media=album,
-                    reply_parameters=media_reply,
-                )
-                msg.tg_message_ids.extend(sent.message_id for sent in sent_messages)
-                msg.next_media_index = len(media)
-        finally:
-            for content in contents:
-                content.close()
     else:
-        media_caption, media_reply = await _prepare_media_caption(
-            msg,
-            bot,
-            group_id,
-            caption,
-            reply_parameters,
-            parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
+        await _forward_media_sequential(
+            msg, bot, client, group_id, media, caption, reply_parameters, parse_mode
         )
-        for index in range(msg.next_media_index, len(media)):
-            kind, url, filename = media[index]
-            content = await download_media(
-                client,
-                url,
-                filename=filename,
-                kind=kind,
-            )
-            try:
-                if kind == "record":
-                    await track_conversion("voice", normalize_onebot_record(content))
-                is_gif = kind == "image" and _is_gif(content)
-                upload_filename = (
-                    f"{Path(filename).stem or 'animation'}.gif" if is_gif else filename
-                )
-                if kind == "record":
-                    upload_filename = content.filename
-                upload = InputFile(
-                    content.file,
-                    filename=upload_filename,
-                    read_file_handle=False,
-                )
-                item_caption = media_caption if not msg.tg_message_ids else None
-                item_reply = media_reply if not msg.tg_message_ids else None
-                if kind == "record":
-                    sent = await bot.send_voice(
-                        chat_id=group_id,
-                        voice=upload,
-                        caption=item_caption,
-                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
-                        reply_parameters=item_reply,
-                    )
-                elif is_gif:
-                    sent = await bot.send_animation(
-                        chat_id=group_id,
-                        animation=upload,
-                        caption=item_caption,
-                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
-                        show_caption_above_media=True,
-                        reply_parameters=item_reply,
-                    )
-                elif kind == "image" and content.size <= PHOTO_LIMIT:
-                    sent = await bot.send_photo(
-                        chat_id=group_id,
-                        photo=upload,
-                        caption=item_caption,
-                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
-                        show_caption_above_media=True,
-                        reply_parameters=item_reply,
-                    )
-                elif kind == "video" and _is_mp4(content):
-                    sent = await bot.send_video(
-                        chat_id=group_id,
-                        video=upload,
-                        caption=item_caption,
-                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
-                        show_caption_above_media=True,
-                        supports_streaming=True,
-                        reply_parameters=item_reply,
-                    )
-                else:
-                    sent = await bot.send_document(
-                        chat_id=group_id,
-                        document=upload,
-                        caption=item_caption,
-                        parse_mode=ParseMode.MARKDOWN_V2 if markdown_v2 else None,
-                        reply_parameters=item_reply,
-                    )
-                msg.tg_message_ids.append(sent.message_id)
-                msg.next_media_index = index + 1
-            finally:
-                content.close()
 
     # 远端发送已经完成，本地映射失败不能触发 Telegram 重发。
     try:
@@ -689,6 +483,238 @@ async def forward_onebot_to_telegram(
         )
     except Exception:  # noqa: BLE001
         baselog.exception("Telegram 消息发送成功，但消息映射保存失败")
+
+
+async def _forward_announcement(
+    msg: OneBotMessage,
+    bot: ExtBot[None],
+    client: httpx.AsyncClient,
+    group_id: int,
+    announcement: tuple[str, str | None],
+    sender_name: str,
+    reply_parameters: ReplyParameters | None,
+) -> None:
+    """把 OneBot 群公告正文作为文档发送，并在其后附加首张公告图片。"""
+    body, image_url = announcement
+    if msg.announcement_filename is None:
+        msg.announcement_filename = f"群公告 - {token_hex(8)}.md"
+    if not msg.tg_message_ids:
+        # 公告文件可能被下载和长期保存，正文作者永久隐藏数字 ID；Telegram
+        # caption 仍沿用上方按当前群 id_show 设置生成的 sender_name。
+        author = ONEBOT_USER_NAME if msg.sender_name_is_fallback else msg.sender_name
+        content = f"{author}:\n\n# 群公告\n\n{body}\n".encode()
+        sent = await bot.send_document(
+            chat_id=group_id,
+            document=InputFile(content, filename=msg.announcement_filename),
+            caption=f"{sender_name}:",
+            reply_parameters=reply_parameters,
+        )
+        msg.tg_message_ids.append(sent.message_id)
+    if image_url is not None and len(msg.tg_message_ids) == 1:
+        image = await download_image(
+            client,
+            image_url,
+            filename="群公告图片.jpg",
+        )
+        try:
+            upload = InputFile(
+                image.file,
+                filename=image.filename,
+                read_file_handle=False,
+            )
+            image_reply = ReplyParameters(
+                message_id=msg.tg_message_ids[0],
+                allow_sending_without_reply=True,
+            )
+            if image.size <= PHOTO_LIMIT:
+                sent = await bot.send_photo(
+                    chat_id=group_id,
+                    photo=upload,
+                    reply_parameters=image_reply,
+                )
+            else:
+                sent = await bot.send_document(
+                    chat_id=group_id,
+                    document=upload,
+                    reply_parameters=image_reply,
+                )
+            msg.tg_message_ids.append(sent.message_id)
+        finally:
+            image.close()
+
+
+async def _forward_super_face(
+    msg: OneBotMessage,
+    bot: ExtBot[None],
+    group_id: int,
+    super_face_id: str,
+    sender_name: str,
+    caption: str,
+    reply_parameters: ReplyParameters | None,
+    parse_mode: ParseMode | None,
+) -> None:
+    """发送超级表情对应的 Telegram Sticker；缺失映射时回退为文本。"""
+    sticker_file_id = await onebot_super_face_file_id(bot, super_face_id)
+    if sticker_file_id is not None:
+        if not msg.tg_message_ids:
+            sent_header = await bot.send_message(
+                chat_id=group_id,
+                text=f"{sender_name}:",
+                reply_parameters=reply_parameters,
+            )
+            msg.tg_message_ids.append(sent_header.message_id)
+        sent_sticker = await bot.send_sticker(
+            chat_id=group_id,
+            sticker=sticker_file_id,
+        )
+        msg.tg_message_ids.append(sent_sticker.message_id)
+    else:
+        await _send_text_chunks(
+            msg,
+            bot,
+            group_id,
+            caption,
+            reply_parameters,
+            parse_mode=parse_mode,
+        )
+
+
+async def _forward_media_album(
+    msg: OneBotMessage,
+    bot: ExtBot[None],
+    client: httpx.AsyncClient,
+    group_id: int,
+    media: list[tuple[str, str, str]],
+    caption: str,
+    reply_parameters: ReplyParameters | None,
+    parse_mode: ParseMode | None,
+) -> None:
+    """把 2~10 张图片作为 Telegram 媒体组发送；含 GIF 时逐条发送。"""
+    media_caption, media_reply = await _prepare_media_caption(
+        msg,
+        bot,
+        group_id,
+        caption,
+        reply_parameters,
+        parse_mode=parse_mode,
+    )
+    contents: list[MediaFile] = []
+    try:
+        for kind, url, filename in media:
+            contents.append(
+                await download_media(
+                    client,
+                    url,
+                    filename=filename,
+                    kind=kind,
+                )
+            )
+        as_animations = any(_is_gif(content) for content in contents)
+        as_photos = all(content.size <= PHOTO_LIMIT for content in contents)
+        album: list[InputMediaPhoto | InputMediaDocument] = []
+        if as_animations:
+            await _send_downloaded_media_individually(
+                msg,
+                bot,
+                group_id,
+                media,
+                contents,
+                media_caption,
+                media_reply,
+                parse_mode,
+            )
+        elif as_photos:
+            album = [
+                InputMediaPhoto(
+                    media=InputFile(
+                        content.file,
+                        filename=filename,
+                        attach=True,
+                        read_file_handle=False,
+                    ),
+                    caption=media_caption if index == 0 else None,
+                    parse_mode=parse_mode,
+                    # Telegram 要求媒体组内所有项的 show_caption_above_media 一致；
+                    # caption 只放首项，但该标志必须全组统一，否则整组被拒。
+                    show_caption_above_media=True,
+                )
+                for index, (content, (_, _, filename)) in enumerate(
+                    zip(contents, media, strict=True)
+                )
+            ]
+        else:
+            album = [
+                InputMediaDocument(
+                    media=InputFile(
+                        content.file,
+                        filename=filename,
+                        attach=True,
+                        read_file_handle=False,
+                    ),
+                    caption=media_caption if index == len(contents) - 1 else None,
+                    parse_mode=parse_mode,
+                )
+                for index, (content, (_, _, filename)) in enumerate(
+                    zip(contents, media, strict=True)
+                )
+            ]
+        if not as_animations:
+            sent_messages = await bot.send_media_group(
+                chat_id=group_id,
+                media=album,
+                reply_parameters=media_reply,
+            )
+            msg.tg_message_ids.extend(sent.message_id for sent in sent_messages)
+            msg.next_media_index = len(media)
+    finally:
+        for content in contents:
+            content.close()
+
+
+async def _forward_media_sequential(
+    msg: OneBotMessage,
+    bot: ExtBot[None],
+    client: httpx.AsyncClient,
+    group_id: int,
+    media: list[tuple[str, str, str]],
+    caption: str,
+    reply_parameters: ReplyParameters | None,
+    parse_mode: ParseMode | None,
+) -> None:
+    """逐条下载并发送媒体，支持断点续发与语音规范化。"""
+    media_caption, media_reply = await _prepare_media_caption(
+        msg,
+        bot,
+        group_id,
+        caption,
+        reply_parameters,
+        parse_mode=parse_mode,
+    )
+    for index in range(msg.next_media_index, len(media)):
+        kind, url, filename = media[index]
+        content = await download_media(
+            client,
+            url,
+            filename=filename,
+            kind=kind,
+        )
+        try:
+            if kind == "record":
+                await track_conversion("voice", normalize_onebot_record(content))
+            await _send_single_media(
+                msg,
+                bot,
+                group_id,
+                content,
+                kind,
+                filename,
+                media_caption,
+                media_reply,
+                parse_mode,
+            )
+            msg.next_media_index = index + 1
+        finally:
+            content.close()
 
 
 async def recall_onebot_message_from_telegram(
@@ -804,7 +830,12 @@ async def forward_onebot_group_ban_to_telegram(
         text = f"{user} 被管理员 {operator} 解除禁言"
     else:
         text = f"{user} 被管理员 {operator} 禁言 {format_duration(event.duration)}"
-    await bot.send_message(chat_id=tg_chat_id, text=text)
+    await bot.send_message(
+        chat_id=tg_chat_id,
+        text=text,
+        disable_notification=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
 
 
 def onebot_group_ban_task(
@@ -842,7 +873,12 @@ async def forward_onebot_group_member_to_telegram(
     )
     user = _event_member_text(name, event.user_id, show_id=show_id)
     action = "加入群聊" if event.joined else "退出群聊"
-    await bot.send_message(chat_id=tg_chat_id, text=f"{user} {action}")
+    await bot.send_message(
+        chat_id=tg_chat_id,
+        text=f"{user} {action}",
+        disable_notification=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
+    )
 
 
 def onebot_group_member_task(
@@ -890,6 +926,8 @@ async def forward_onebot_poke_to_telegram(
     await bot.send_message(
         chat_id=tg_chat_id,
         text=f"{user} {event.action} {target} {event.suffix}",
+        disable_notification=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True),
     )
 
 
@@ -974,45 +1012,91 @@ async def _send_downloaded_media_individually(
     for index, (content, (kind, _, filename)) in enumerate(
         zip(contents, media, strict=True)
     ):
-        is_gif = kind == "image" and _is_gif(content)
-        upload_filename = (
-            f"{Path(filename).stem or 'animation'}.gif" if is_gif else filename
+        await _send_single_media(
+            msg,
+            bot,
+            group_id,
+            content,
+            kind,
+            filename,
+            caption,
+            reply_parameters,
+            parse_mode,
         )
-        upload = InputFile(
-            content.file,
-            filename=upload_filename,
-            read_file_handle=False,
-        )
-        media_caption = caption if not msg.tg_message_ids else None
-        media_reply = reply_parameters if not msg.tg_message_ids else None
-        if is_gif:
-            sent = await bot.send_animation(
-                chat_id=group_id,
-                animation=upload,
-                caption=media_caption,
-                parse_mode=parse_mode,
-                show_caption_above_media=True,
-                reply_parameters=media_reply,
-            )
-        elif kind == "image" and content.size <= PHOTO_LIMIT:
-            sent = await bot.send_photo(
-                chat_id=group_id,
-                photo=upload,
-                caption=media_caption,
-                parse_mode=parse_mode,
-                show_caption_above_media=True,
-                reply_parameters=media_reply,
-            )
-        else:
-            sent = await bot.send_document(
-                chat_id=group_id,
-                document=upload,
-                caption=media_caption,
-                parse_mode=parse_mode,
-                reply_parameters=media_reply,
-            )
-        msg.tg_message_ids.append(sent.message_id)
         msg.next_media_index = index + 1
+
+
+async def _send_single_media(
+    msg: OneBotMessage,
+    bot: ExtBot[None],
+    group_id: int,
+    content: MediaFile,
+    kind: str,
+    filename: str,
+    caption: str | None,
+    reply_parameters: ReplyParameters | None,
+    parse_mode: ParseMode | None,
+) -> None:
+    """发送单个已下载媒体，并按媒体类型选择合适的 Telegram 发送方法。
+
+    caption 与 reply 只在本条 OneBot 消息尚未发出任何 Telegram 消息时附加，
+    使后续媒体不会重复附带作者与引用信息。
+    """
+    is_gif = kind == "image" and _is_gif(content)
+    if kind == "record":
+        upload_filename = content.filename
+    elif is_gif:
+        upload_filename = f"{Path(filename).stem or 'animation'}.gif"
+    else:
+        upload_filename = filename
+    upload = InputFile(content.file, filename=upload_filename, read_file_handle=False)
+    item_caption = caption if not msg.tg_message_ids else None
+    item_reply = reply_parameters if not msg.tg_message_ids else None
+    if kind == "record":
+        sent = await bot.send_voice(
+            chat_id=group_id,
+            voice=upload,
+            caption=item_caption,
+            parse_mode=parse_mode,
+            reply_parameters=item_reply,
+        )
+    elif is_gif:
+        sent = await bot.send_animation(
+            chat_id=group_id,
+            animation=upload,
+            caption=item_caption,
+            parse_mode=parse_mode,
+            show_caption_above_media=True,
+            reply_parameters=item_reply,
+        )
+    elif kind == "image" and content.size <= PHOTO_LIMIT:
+        sent = await bot.send_photo(
+            chat_id=group_id,
+            photo=upload,
+            caption=item_caption,
+            parse_mode=parse_mode,
+            show_caption_above_media=True,
+            reply_parameters=item_reply,
+        )
+    elif kind == "video" and _is_mp4(content):
+        sent = await bot.send_video(
+            chat_id=group_id,
+            video=upload,
+            caption=item_caption,
+            parse_mode=parse_mode,
+            show_caption_above_media=True,
+            supports_streaming=True,
+            reply_parameters=item_reply,
+        )
+    else:
+        sent = await bot.send_document(
+            chat_id=group_id,
+            document=upload,
+            caption=item_caption,
+            parse_mode=parse_mode,
+            reply_parameters=item_reply,
+        )
+    msg.tg_message_ids.append(sent.message_id)
 
 
 async def _prepare_media_caption(
@@ -1055,6 +1139,7 @@ async def _send_text_chunks(
             chat_id=group_id,
             text=chunks[index],
             reply_parameters=reply_parameters if index == 0 else None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
             **send_options,
         )
         msg.tg_message_ids.append(sent.message_id)

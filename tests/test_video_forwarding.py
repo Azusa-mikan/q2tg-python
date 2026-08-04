@@ -6,6 +6,7 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from telegram import LinkPreviewOptions
 from telegram.ext import ExtBot
 
 from src.forwarding import (
@@ -362,6 +363,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-456,
             text="OneBot 用户:\nmessage",
             reply_parameters=None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
     async def test_disabled_id_show_keeps_real_sender_name(self) -> None:
@@ -389,6 +391,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-456,
             text="Named User:\nmessage",
             reply_parameters=None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
     async def test_enabled_id_show_appends_user_id_to_real_sender_name(self) -> None:
@@ -416,6 +419,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-456,
             text="Example User[234]:\nmessage",
             reply_parameters=None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
     async def test_enabled_id_show_does_not_duplicate_fallback_user_id(self) -> None:
@@ -444,6 +448,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-456,
             text="OneBot 用户[234]:\nmessage",
             reply_parameters=None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
     async def test_onebot_non_mp4_video_is_sent_as_document(self) -> None:
@@ -712,11 +717,10 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         album = bot.send_media_group.await_args.kwargs["media"]
         self.assertEqual(len(album), 3)
         self.assertEqual(album[0].caption, "OneBot User[1]:\n测试")
-        self.assertTrue(album[0].show_caption_above_media)
         self.assertIsNone(album[1].caption)
-        self.assertFalse(album[1].show_caption_above_media)
         self.assertIsNone(album[2].caption)
-        self.assertFalse(album[2].show_caption_above_media)
+        # Telegram 要求媒体组内所有项的 show_caption_above_media 一致，否则整组被拒。
+        self.assertTrue(all(item.show_caption_above_media for item in album))
         attach_uris = [item.media.attach_uri for item in album]
         self.assertTrue(all(uri and uri.startswith("attach://") for uri in attach_uris))
         self.assertEqual(len(set(attach_uris)), 3)
@@ -814,6 +818,7 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-456,
             text="OneBot User[1]:\n[视频无法转发：缺少可用的 HTTP(S) 下载地址]",
             reply_parameters=None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         mapping = await self.database.get_tg_message(123, 103)
         self.assertIsNotNone(mapping)

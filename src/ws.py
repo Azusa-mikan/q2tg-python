@@ -1,7 +1,6 @@
 """SnowLuma WebSocket 认证、路由及连接级资源生命周期。"""
 
 import asyncio
-from contextlib import suppress
 from secrets import compare_digest
 from typing import Annotated
 
@@ -19,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from src.bus import message_bus
 from src.config import config
+from src.lifecycle import await_cancelled
 from src.log import baselog
 from src.messages import SendLane, SendTarget
 from src.qbot import q_gateway, receive_onebot_event
@@ -113,8 +113,7 @@ async def snowluma_ws(websocket: WebSocket) -> None:
             for consumer in onebot_consumers:
                 consumer.cancel()
             for consumer in onebot_consumers:
-                with suppress(asyncio.CancelledError):
-                    await consumer
+                await await_cancelled(consumer)
             try:
                 # 停止 Telegram 生产新消息，但保留 Bot API 客户端供队列排空。
                 await tgbot.stop()

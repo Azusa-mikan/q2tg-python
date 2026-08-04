@@ -7,19 +7,11 @@ from telegram.ext import Application, ApplicationBuilder
 
 from src.log import baselog
 
-from .handlers import TGhandlers
+from .handlers import COMMAND_SPECS, TGhandlers
 
-BOT_COMMANDS = (
-    BotCommand("start", "查看 Bot 运行状态"),
-    BotCommand("status", "查看 Q2TG 运行状态"),
-    BotCommand("bind", "绑定当前 Telegram 群与 OneBot 群"),
-    BotCommand("unbind", "解除当前群的 OneBot 群绑定"),
-    BotCommand("forward", "查看或设置 Telegram 到 OneBot 转发"),
-    BotCommand("bot_forward", "查看或设置其他 Bot 消息转发"),
-    BotCommand("id_show", "查看或设置 OneBot 用户 ID 显示"),
-    BotCommand("at", "选择需要 @ 的 OneBot 群成员"),
-    BotCommand("undo", "撤回所回复消息的双侧副本"),
-    BotCommand("unpin", "取消所回复消息的置顶和精华"),
+# 命令名与描述来自 handlers.COMMAND_SPECS 单一真相源，菜单与 handler 注册不再各写一遍。
+BOT_COMMANDS = tuple(
+    BotCommand(spec.name, spec.description) for spec in COMMAND_SPECS
 )
 
 

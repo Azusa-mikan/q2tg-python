@@ -6,6 +6,7 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from telegram import LinkPreviewOptions
 from telegram.ext import ExtBot
 
 from src.bus import MessageBus
@@ -78,6 +79,8 @@ class OneBotGroupBanTests(unittest.IsolatedAsyncioTestCase):
         self.send_message.assert_awaited_once_with(
             chat_id=-100123,
             text="用户名[101] 被管理员 测试管理员[103] 禁言 10 分钟",
+            disable_notification=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         self.assertEqual(self.get_group_member_info.await_count, 2)
 
@@ -101,6 +104,8 @@ class OneBotGroupBanTests(unittest.IsolatedAsyncioTestCase):
         self.send_message.assert_awaited_once_with(
             chat_id=-100123,
             text="用户名 被管理员 测试管理员 解除禁言",
+            disable_notification=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
 
     async def test_malformed_ban_is_not_queued(self) -> None:

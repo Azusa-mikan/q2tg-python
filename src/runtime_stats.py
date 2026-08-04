@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Awaitable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from time import perf_counter
 from typing import Literal
 
@@ -22,26 +22,14 @@ ConversionKind = Literal[
     "sticker_tgs",
     "sticker_video",
 ]
-
-
-@dataclass(slots=True)
-class ConversionTimes:
-    """各类转换最近 30 次成功调用的耗时，单位为秒。"""
-
-    voice: deque[float] = field(default_factory=lambda: deque(maxlen=CONVERSION_HISTORY_SIZE))
-    video: deque[float] = field(default_factory=lambda: deque(maxlen=CONVERSION_HISTORY_SIZE))
-    sticker_static: deque[float] = field(
-        default_factory=lambda: deque(maxlen=CONVERSION_HISTORY_SIZE)
-    )
-    sticker_tgs: deque[float] = field(
-        default_factory=lambda: deque(maxlen=CONVERSION_HISTORY_SIZE)
-    )
-    sticker_video: deque[float] = field(
-        default_factory=lambda: deque(maxlen=CONVERSION_HISTORY_SIZE)
-    )
-
-    def get(self, kind: ConversionKind) -> deque[float]:
-        return getattr(self, kind)
+# 单一来源的转换种类列表，驱动耗时记录与平均值构建，新增种类只改这里。
+CONVERSION_KINDS: tuple[ConversionKind, ...] = (
+    "voice",
+    "video",
+    "sticker_static",
+    "sticker_tgs",
+    "sticker_video",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +62,9 @@ class RuntimeInfo:
     conversion_averages: ConversionAverages
 
 
-conversion_times = ConversionTimes()
+conversion_times: dict[ConversionKind, deque[float]] = {
+    kind: deque(maxlen=CONVERSION_HISTORY_SIZE) for kind in CONVERSION_KINDS
+}
 
 
 def _get_rss() -> str:
@@ -107,11 +97,7 @@ def _average(samples: deque[float]) -> float | None:
 def _get_conversion_averages() -> ConversionAverages:
     """返回各类转换平均耗时，单位为秒。"""
     return ConversionAverages(
-        voice=_average(conversion_times.voice),
-        video=_average(conversion_times.video),
-        sticker_static=_average(conversion_times.sticker_static),
-        sticker_tgs=_average(conversion_times.sticker_tgs),
-        sticker_video=_average(conversion_times.sticker_video),
+        **{kind: _average(samples) for kind, samples in conversion_times.items()}
     )
 
 
@@ -128,6 +114,5 @@ async def track_conversion[T](kind: ConversionKind, operation: Awaitable[T]) -> 
     """执行一次转换，仅在成功后记录耗时。"""
     started_at = perf_counter()
     result = await operation
-    samples = conversion_times.get(kind)
-    samples.append(perf_counter() - started_at)
+    conversion_times[kind].append(perf_counter() - started_at)
     return result

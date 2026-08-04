@@ -20,8 +20,24 @@ RUN apt-get update \
 # 先只复制依赖清单，源码变化不会使依赖层缓存失效。
 COPY pyproject.toml uv.lock ./
 
+# pilk 只提供 sdist；asyncmy 缺 arm64 wheel，在 arm64 上也从 sdist 现场编译。
+# --refresh-package 让它们忽略可能来自其他 libc（如 alpine/musl）的旧构建缓存，
+# 避免复用不匹配当前 glibc 的扩展。
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --no-install-project
+    uv sync --locked --no-dev --no-install-project \
+        --refresh-package pilk --refresh-package asyncmy
+
+# 校验现场编译的原生扩展确实为当前 glibc 环境构建（后缀应为 *-linux-gnu.so）。
+# 若命中跨 libc 的旧缓存会得到 *-musl.so，运行时无法加载，这里提前失败。
+RUN set -eu; \
+    for pkg in _pilk asyncmy; do \
+        so="$(find /app/.venv -path "*/${pkg}*" -name '*.so' -print -quit)"; \
+        if [ -z "$so" ]; then echo "${pkg} 原生扩展缺失" >&2; exit 1; fi; \
+        case "$so" in \
+            *-linux-gnu.so) echo "${pkg} 扩展就绪: $so" ;; \
+            *) echo "${pkg} 扩展 libc 不匹配: $so" >&2; exit 1 ;; \
+        esac; \
+    done
 
 FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-trixie-slim AS runtime
 

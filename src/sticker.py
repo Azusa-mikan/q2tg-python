@@ -5,17 +5,21 @@ import gzip
 import os
 import time
 from pathlib import Path
-from tempfile import NamedTemporaryFile, TemporaryDirectory
+from tempfile import TemporaryDirectory
 
 from PIL import Image, UnidentifiedImageError
 
 from src.log import baselog
 from src.media import (
+    FFMPEG_BASE_ARGS,
+    MEDIA_SIZE_LIMIT_TEXT,
     STREAM_CHUNK_SIZE,
     MediaFile,
     communicate_media_process,
-    replace_media_content,
+    decode_process_error,
+    finalize_media,
     start_media_process,
+    transcode_target,
 )
 from src.paths import ensure_temp_dir
 
@@ -31,46 +35,32 @@ LOTTIE_CONVERTER_IMAGE = (
 async def static_sticker_to_png(media: MediaFile, *, size_limit: int) -> None:
     """使用 Pillow 将静态贴纸或 TGS 缩略图转换为透明 PNG。"""
     started_at = time.monotonic()
-    with NamedTemporaryFile(
-        suffix=".png",
-        delete=False,
-        dir=str(ensure_temp_dir()),
-    ) as output:
-        output_path = Path(output.name)
-    try:
+    async with transcode_target(".png") as output_path:
         try:
             await asyncio.to_thread(_render_png, media, output_path)
         except (OSError, UnidentifiedImageError):
             raise ValueError("Telegram 静态贴纸转换失败") from None
         if output_path.stat().st_size > size_limit:
-            raise ValueError("Telegram 贴纸转换后超过 20 MB 上限")
-        await asyncio.to_thread(replace_media_content, media, output_path)
-        media.filename = f"{Path(media.filename).stem or 'sticker'}.png"
-        media.media_type = "image/png"
+            raise ValueError(f"Telegram 贴纸转换后超过 {MEDIA_SIZE_LIMIT_TEXT} 上限")
+        await asyncio.to_thread(
+            finalize_media,
+            media,
+            output_path,
+            stem_fallback="sticker",
+            suffix=".png",
+            media_type="image/png",
+        )
         baselog.info("静态贴纸转换完成，耗时 %.2f 秒", time.monotonic() - started_at)
-    finally:
-        output_path.unlink(missing_ok=True)
 
 
 async def video_sticker_to_gif(media: MediaFile, *, size_limit: int) -> None:
     """使用 ffmpeg 将 WebM/VP9 视频贴纸转换为循环透明 GIF。"""
     started_at = time.monotonic()
-    with NamedTemporaryFile(
-        suffix=".gif",
-        delete=False,
-        dir=str(ensure_temp_dir()),
-    ) as output:
-        output_path = Path(output.name)
-    try:
+    async with transcode_target(".gif") as output_path:
         input_fd = media.file.fileno()
         media.rewind()
         process = await start_media_process(
-            "ffmpeg",
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
+            *FFMPEG_BASE_ARGS,
             "-c:v",
             "libvpx-vp9",
             "-i",
@@ -96,16 +86,18 @@ async def video_sticker_to_gif(media: MediaFile, *, size_limit: int) -> None:
             timeout_error="Telegram 视频贴纸转换超时",
         )
         if process.returncode != 0:
-            error = stderr.decode("utf-8", errors="replace").strip()
-            raise ValueError(f"Telegram 视频贴纸转换失败: {error[-500:] or '未知错误'}")
+            raise ValueError(f"Telegram 视频贴纸转换失败: {decode_process_error(stderr)}")
         if output_path.stat().st_size > size_limit:
-            raise ValueError("Telegram 贴纸转换后超过 20 MB 上限")
-        await asyncio.to_thread(replace_media_content, media, output_path)
-        media.filename = f"{Path(media.filename).stem or 'sticker'}.gif"
-        media.media_type = "image/gif"
+            raise ValueError(f"Telegram 贴纸转换后超过 {MEDIA_SIZE_LIMIT_TEXT} 上限")
+        await asyncio.to_thread(
+            finalize_media,
+            media,
+            output_path,
+            stem_fallback="sticker",
+            suffix=".gif",
+            media_type="image/gif",
+        )
         baselog.info("视频贴纸转码完成，耗时 %.2f 秒", time.monotonic() - started_at)
-    finally:
-        output_path.unlink(missing_ok=True)
 
 
 async def tgs_sticker_to_gif(media: MediaFile) -> None:
@@ -160,9 +152,14 @@ async def tgs_sticker_to_gif(media: MediaFile) -> None:
                 missing_error="本地 TGS 贴纸转发需要安装 Docker",
                 failure_prefix="Docker TGS 贴纸转换失败",
             )
-        await asyncio.to_thread(replace_media_content, media, output_path)
-        media.filename = f"{Path(media.filename).stem or 'sticker'}.gif"
-        media.media_type = "image/gif"
+        await asyncio.to_thread(
+            finalize_media,
+            media,
+            output_path,
+            stem_fallback="sticker",
+            suffix=".gif",
+            media_type="image/gif",
+        )
         baselog.info("TGS 贴纸转码完成，耗时 %.2f 秒", time.monotonic() - started_at)
 
 
@@ -211,8 +208,7 @@ async def _run_sticker_process(
         timeout_error=f"{failure_prefix}：处理超时",
     )
     if process.returncode != 0:
-        error = stderr.decode("utf-8", errors="replace").strip()
-        raise ValueError(f"{failure_prefix}: {error[-500:] or '未知错误'}")
+        raise ValueError(f"{failure_prefix}: {decode_process_error(stderr)}")
 
 
 def _render_png(media: MediaFile, output_path: Path) -> None:

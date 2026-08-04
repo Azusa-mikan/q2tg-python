@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 import httpx
 from telegram import (
+    Chat,
     ChatMember,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -27,6 +28,7 @@ from telegram import (
     MessageOriginHiddenUser,
     MessageOriginUser,
     Update,
+    User,
 )
 from telegram.ext import (
     BaseHandler,
@@ -47,7 +49,13 @@ from src.forwarding import (
     telegram_processing_task,
 )
 from src.log import baselog
-from src.media import MediaFile, media_item_budget, media_queue_budget
+from src.media import (
+    MEDIA_SIZE_LIMIT,
+    MEDIA_SIZE_LIMIT_TEXT,
+    MediaFile,
+    media_item_budget,
+    media_queue_budget,
+)
 from src.messages import (
     ONEBOT_USER_NAME,
     OneBotConnectionError,
@@ -62,7 +70,7 @@ from src.qbot import q_gateway
 from src.runtime_stats import get_runtime_info
 from src.sql import sql
 
-TELEGRAM_DOWNLOAD_LIMIT = 20_000_000
+TELEGRAM_DOWNLOAD_LIMIT = MEDIA_SIZE_LIMIT
 TELEGRAM_VIDEO_LIMIT = TELEGRAM_DOWNLOAD_LIMIT
 TELEGRAM_ALBUM_LIMIT = 10
 TELEGRAM_ALBUM_BYTES_LIMIT = 100_000_000
@@ -74,6 +82,47 @@ INLINE_AT_SNAPSHOT_LIMIT = 64
 INLINE_AT_SELECTION_LIMIT = 4096
 INLINE_AT_URL_PREFIX = "https://q2tg.invalid/token/"
 INLINE_AT_MARKER = "\u2063"
+
+# Telegram delete_messages 单次最多 100 条。
+TELEGRAM_DELETE_BATCH = 100
+# 群聊管理员身份集合，多个命令共用。
+GROUP_ADMIN_STATUSES = {ChatMember.ADMINISTRATOR, ChatMember.OWNER}
+# 视为群聊的 chat.type 集合。
+GROUP_CHAT_TYPES = {"group", "supergroup"}
+
+# 复用的用户可见文案。
+NOT_BOUND_TEXT = "当前群聊尚未绑定 OneBot 群"
+GROUP_ONLY_TEXT = "请在 Telegram 群聊中使用此命令"
+ONEBOT_ERROR_TEXT = "OneBot 错误，请检查日志"
+NO_MAPPING_TEXT = "未找到该消息的跨平台映射"
+
+
+@dataclass(frozen=True, slots=True)
+class CommandSpec:
+    """单一真相源的命令定义：命令名、菜单描述和 TGhandlers 方法名。
+
+    get_handlers 据此生成 CommandHandler，BOT_COMMANDS 据此生成菜单，
+    命令名不再在注册与菜单两处分别硬编码。
+    """
+
+    name: str
+    description: str
+    handler_attr: str
+
+
+# 命令注册顺序即菜单展示顺序：功能命令在前，状态查询在后。
+COMMAND_SPECS: tuple[CommandSpec, ...] = (
+    CommandSpec("start", "查看 Bot 运行状态", "start"),
+    CommandSpec("bind", "绑定当前 Telegram 群与 OneBot 群", "bind"),
+    CommandSpec("unbind", "解除当前群的 OneBot 群绑定", "unbind"),
+    CommandSpec("forward", "查看或设置 Telegram 到 OneBot 转发", "forward"),
+    CommandSpec("bot_forward", "查看或设置其他 Bot 消息转发", "bot_forward"),
+    CommandSpec("id_show", "查看或设置 OneBot 用户 ID 显示", "id_show"),
+    CommandSpec("at", "选择需要 @ 的 OneBot 群成员", "at"),
+    CommandSpec("undo", "撤回所回复消息的双侧副本", "undo"),
+    CommandSpec("unpin", "取消所回复消息的置顶和精华", "unpin"),
+    CommandSpec("status", "查看 Q2TG 运行状态", "get_status"),
+)
 
 
 @dataclass(slots=True)
@@ -118,6 +167,14 @@ def forward_origin_name(origin: MessageOrigin | None) -> str | None:
         )
     return None
 
+
+def is_anonymous_sender(msg: Message) -> bool:
+    """匿名管理员以群身份发言：sender_chat 即当前群，其 from_user 是
+    GroupAnonymousBot（is_bot 为真），但本质是群成员而非其他 Bot。"""
+    sender_chat = getattr(msg, "sender_chat", None)
+    return sender_chat is not None and sender_chat.id == msg.chat_id
+
+
 class TGhandlers:
     """Telegram 命令、文本和媒体入口集合。
 
@@ -141,6 +198,86 @@ class TGhandlers:
         self._inline_at_selections: dict[str, InlineAtSelection] = {}
         self._inline_at_selection_tokens: dict[tuple[str, int], str] = {}
 
+    @staticmethod
+    async def _require_group_context(
+        update: Update,
+    ) -> tuple[Message, Chat, User] | None:
+        """取得群聊命令所需的 message/chat/user，非群聊或缺字段时回复并返回 None。"""
+        msg = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if msg is None or chat is None or user is None:
+            return None
+        if chat.type not in GROUP_CHAT_TYPES:
+            # 私聊没有可作为桥接目标的群 chat_id，因此拒绝执行。
+            await msg.reply_text(GROUP_ONLY_TEXT)
+            return None
+        return msg, chat, user
+
+    @staticmethod
+    async def _is_group_admin(bot: Any, chat_id: int, user_id: int) -> bool:
+        """判断用户是否为目标群的管理员或群主。"""
+        member = await bot.get_chat_member(chat_id, user_id)
+        return member.status in GROUP_ADMIN_STATUSES
+
+    @staticmethod
+    def _parse_toggle_args(raw_args: list[str] | None) -> list[str] | None:
+        """校验 on/off 开关参数；非法时返回 None，合法时返回小写参数列表。"""
+        args = [arg.lower() for arg in (raw_args or [])]
+        if len(args) > 1 or (args and args[0] not in {"on", "off"}):
+            return None
+        return args
+
+    async def _handle_simple_toggle(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        *,
+        usage_command: str,
+        admin_error: str,
+        getter: Callable[[int], Awaitable[bool | None]],
+        setter: Callable[[int, bool], Awaitable[bool]],
+        status_text: Callable[[bool], str],
+    ) -> None:
+        """处理只回复本地状态、不通知对端的 on/off 开关命令。"""
+        context_group = await self._require_group_context(update)
+        if context_group is None:
+            return
+        msg, chat, user = context_group
+        if not await self._is_group_admin(context.bot, chat.id, user.id):
+            await msg.reply_text(admin_error)
+            return
+        args = self._parse_toggle_args(context.args)
+        if args is None:
+            await msg.reply_text(f"用法：{usage_command} [on|off]")
+            return
+        if not args:
+            enabled = await getter(chat.id)
+            if enabled is None:
+                await msg.reply_text(NOT_BOUND_TEXT)
+                return
+            await msg.reply_text(status_text(enabled))
+            return
+        enabled = args[0] == "on"
+        if not await setter(chat.id, enabled):
+            await msg.reply_text(NOT_BOUND_TEXT)
+            return
+        await msg.reply_text(status_text(enabled))
+
+    @staticmethod
+    async def _fetch_group_name(msg: Message, q_group_id: int, action: str) -> str | None:
+        """查询 OneBot 群名称；失败时回复错误提示并返回 None。"""
+        try:
+            group = await q_gateway.get_group_info(q_group_id)
+            group_name = group.get("group_name")
+            if not isinstance(group_name, str) or not group_name:
+                raise TypeError(f"OneBot 群资料缺少 group_name: {group!r}")
+        except (OneBotConnectionError, RuntimeError, TimeoutError, TypeError):
+            baselog.exception("%s时查询 OneBot 群资料失败: %s", action, q_group_id)
+            await msg.reply_text(ONEBOT_ERROR_TEXT)
+            return None
+        return group_name
+
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """在群聊显示状态，在私聊提供管理员引导或联系方式。"""
         msg = update.effective_message
@@ -149,7 +286,7 @@ class TGhandlers:
         if msg is None or chat is None or user is None:
             return
 
-        if chat.type in {"group", "supergroup"}:
+        if chat.type in GROUP_CHAT_TYPES:
             await self.get_status(update, context)
             return
 
@@ -182,15 +319,10 @@ class TGhandlers:
 
     async def bind(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """由管理员在当前 Telegram 群绑定一个 OneBot 群号。"""
-        msg = update.effective_message
-        chat = update.effective_chat
-        user = update.effective_user
-        if msg is None or chat is None or user is None:
+        context_group = await self._require_group_context(update)
+        if context_group is None:
             return
-        if chat.type not in {"group", "supergroup"}:
-            # 私聊没有可作为桥接目标的群 chat_id，因此拒绝执行。
-            await msg.reply_text("请在 Telegram 群聊中使用此命令")
-            return
+        msg, chat, user = context_group
         if user.id != config.tgbot_admin:
             await msg.reply_text("只有管理员可以绑定群聊")
             return
@@ -205,18 +337,18 @@ class TGhandlers:
             await msg.reply_text(str(error))
             return
 
+        groups = None
         try:
             groups = await q_gateway.get_group_list()
-            if not any(group.get("group_id") == q_group_id for group in groups):
-                await msg.reply_text("OneBot端未找到该群聊")
-                return
-            group = await q_gateway.get_group_info(q_group_id)
-            group_name = group.get("group_name")
-            if not isinstance(group_name, str) or not group_name:
-                raise TypeError(f"OneBot 群资料缺少 group_name: {group!r}")
-        except (OneBotConnectionError, RuntimeError, TimeoutError, TypeError):
-            baselog.exception("绑定群聊时查询 OneBot 群资料失败: %s", q_group_id)
-            await msg.reply_text("OneBot 错误，请检查日志")
+        except (OneBotConnectionError, RuntimeError, TimeoutError):
+            baselog.exception("绑定群聊时查询 OneBot 群列表失败: %s", q_group_id)
+            await msg.reply_text(ONEBOT_ERROR_TEXT)
+            return
+        if not any(group.get("group_id") == q_group_id for group in groups):
+            await msg.reply_text("OneBot端未找到该群聊")
+            return
+        group_name = await self._fetch_group_name(msg, q_group_id, "绑定群聊")
+        if group_name is None:
             return
 
         try:
@@ -235,31 +367,21 @@ class TGhandlers:
 
     async def unbind(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """解除当前 Telegram 群的双向绑定。"""
-        msg = update.effective_message
-        chat = update.effective_chat
-        user = update.effective_user
-        if msg is None or chat is None or user is None:
+        context_group = await self._require_group_context(update)
+        if context_group is None:
             return
-        if chat.type not in {"group", "supergroup"}:
-            await msg.reply_text("请在 Telegram 群聊中使用此命令")
-            return
+        msg, chat, user = context_group
         if user.id != config.tgbot_admin:
             await msg.reply_text("只有管理员可以解除绑定")
             return
 
         q_group_id = await sql.get_q_group(chat.id)
         if q_group_id is None:
-            await msg.reply_text("当前群聊尚未绑定 OneBot 群")
+            await msg.reply_text(NOT_BOUND_TEXT)
             return
 
-        try:
-            group = await q_gateway.get_group_info(q_group_id)
-            group_name = group.get("group_name")
-            if not isinstance(group_name, str) or not group_name:
-                raise TypeError(f"OneBot 群资料缺少 group_name: {group!r}")
-        except (OneBotConnectionError, RuntimeError, TimeoutError, TypeError):
-            baselog.exception("解除绑定时查询 OneBot 群资料失败: %s", q_group_id)
-            await msg.reply_text("OneBot 错误，请检查日志")
+        group_name = await self._fetch_group_name(msg, q_group_id, "解除绑定")
+        if group_name is None:
             return
 
         await sql.unbind_tg_group(chat.id)
@@ -273,28 +395,22 @@ class TGhandlers:
 
     async def forward(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """查询或设置当前 Telegram 群到 OneBot 的转发开关。"""
-        msg = update.effective_message
-        chat = update.effective_chat
-        user = update.effective_user
-        if msg is None or chat is None or user is None:
+        context_group = await self._require_group_context(update)
+        if context_group is None:
             return
-        if chat.type not in {"group", "supergroup"}:
-            await msg.reply_text("请在 Telegram 群聊中使用此命令")
-            return
-
-        member = await context.bot.get_chat_member(chat.id, user.id)
-        if member.status not in {ChatMember.ADMINISTRATOR, ChatMember.OWNER}:
+        msg, chat, user = context_group
+        if not await self._is_group_admin(context.bot, chat.id, user.id):
             await msg.reply_text("只有群聊管理员可以设置转发开关")
             return
 
-        args = context.args or []
-        if len(args) > 1 or (args and args[0].lower() not in {"on", "off"}):
+        args = self._parse_toggle_args(context.args)
+        if args is None:
             await msg.reply_text("用法：/forward [on|off]")
             return
         if not args:
             enabled = await sql.get_tg_forward_enabled(chat.id)
             if enabled is None:
-                await msg.reply_text("当前群聊尚未绑定 OneBot 群")
+                await msg.reply_text(NOT_BOUND_TEXT)
                 return
             q_group_id = await sql.get_q_group(chat.id)
             enqueue_bridge_notice(
@@ -308,13 +424,13 @@ class TGhandlers:
             )
             return
 
-        enabled = args[0].lower() == "on"
+        enabled = args[0] == "on"
         q_group_id = await sql.get_q_group(chat.id)
         if q_group_id is None:
-            await msg.reply_text("当前群聊尚未绑定 OneBot 群")
+            await msg.reply_text(NOT_BOUND_TEXT)
             return
         if not await sql.set_tg_forward_enabled(chat.id, enabled):
-            await msg.reply_text("当前群聊尚未绑定 OneBot 群")
+            await msg.reply_text(NOT_BOUND_TEXT)
             return
         enqueue_bridge_notice(
             partial(
@@ -328,86 +444,40 @@ class TGhandlers:
 
     async def id_show(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """查询或设置 OneBot 用户及 @ 对象是否在 Telegram 显示数字 ID。"""
-        msg = update.effective_message
-        chat = update.effective_chat
-        user = update.effective_user
-        if msg is None or chat is None or user is None:
-            return
-        if chat.type not in {"group", "supergroup"}:
-            await msg.reply_text("请在 Telegram 群聊中使用此命令")
-            return
-
-        member = await context.bot.get_chat_member(chat.id, user.id)
-        if member.status not in {ChatMember.ADMINISTRATOR, ChatMember.OWNER}:
-            await msg.reply_text("只有群聊管理员可以设置 ID 显示")
-            return
-
-        args = context.args or []
-        if len(args) > 1 or (args and args[0].lower() not in {"on", "off"}):
-            await msg.reply_text("用法：/id_show [on|off]")
-            return
-        if not args:
-            enabled = await sql.get_id_show_enabled(chat.id)
-            if enabled is None:
-                await msg.reply_text("当前群聊尚未绑定 OneBot 群")
-                return
-            await msg.reply_text(f"OneBot 用户及 @ 对象 ID 显示已{'开启' if enabled else '关闭'}")
-            return
-
-        enabled = args[0].lower() == "on"
-        if not await sql.set_id_show_enabled(chat.id, enabled):
-            await msg.reply_text("当前群聊尚未绑定 OneBot 群")
-            return
-        await msg.reply_text(f"OneBot 用户及 @ 对象 ID 显示已{'开启' if enabled else '关闭'}")
+        await self._handle_simple_toggle(
+            update,
+            context,
+            usage_command="/id_show",
+            admin_error="只有群聊管理员可以设置 ID 显示",
+            getter=sql.get_id_show_enabled,
+            setter=sql.set_id_show_enabled,
+            status_text=lambda enabled: (
+                f"OneBot 用户及 @ 对象 ID 显示已{'开启' if enabled else '关闭'}"
+            ),
+        )
 
     async def bot_forward(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """查询或设置当前 Telegram 群的其他 Bot 消息转发开关。"""
-        msg = update.effective_message
-        chat = update.effective_chat
-        user = update.effective_user
-        if msg is None or chat is None or user is None:
-            return
-        if chat.type not in {"group", "supergroup"}:
-            await msg.reply_text("请在 Telegram 群聊中使用此命令")
-            return
-
-        member = await context.bot.get_chat_member(chat.id, user.id)
-        if member.status not in {ChatMember.ADMINISTRATOR, ChatMember.OWNER}:
-            await msg.reply_text("只有群聊管理员可以设置其他 Bot 消息转发")
-            return
-
-        args = context.args or []
-        if len(args) > 1 or (args and args[0].lower() not in {"on", "off"}):
-            await msg.reply_text("用法：/bot_forward [on|off]")
-            return
-        if not args:
-            enabled = await sql.get_bot_forward_enabled(chat.id)
-            if enabled is None:
-                await msg.reply_text("当前群聊尚未绑定 OneBot 群")
-                return
-            await msg.reply_text(f"其他 Bot 消息转发已{'开启' if enabled else '关闭'}")
-            return
-
-        enabled = args[0].lower() == "on"
-        if not await sql.set_bot_forward_enabled(chat.id, enabled):
-            await msg.reply_text("当前群聊尚未绑定 OneBot 群")
-            return
-        await msg.reply_text(f"其他 Bot 消息转发已{'开启' if enabled else '关闭'}")
+        await self._handle_simple_toggle(
+            update,
+            context,
+            usage_command="/bot_forward",
+            admin_error="只有群聊管理员可以设置其他 Bot 消息转发",
+            getter=sql.get_bot_forward_enabled,
+            setter=sql.set_bot_forward_enabled,
+            status_text=lambda enabled: f"其他 Bot 消息转发已{'开启' if enabled else '关闭'}",
+        )
 
     async def at(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """在当前绑定群创建 Inline Mode 所需的短期群上下文。"""
-        msg = update.effective_message
-        chat = update.effective_chat
-        user = update.effective_user
-        if msg is None or chat is None or user is None:
+        context_group = await self._require_group_context(update)
+        if context_group is None:
             return
-        if chat.type not in {"group", "supergroup"}:
-            await msg.reply_text("请在 Telegram 群聊中使用此命令")
-            return
+        msg, chat, user = context_group
 
         q_group_id = await sql.get_q_group(chat.id)
         if q_group_id is None:
-            await msg.reply_text("当前群聊尚未绑定 OneBot 群")
+            await msg.reply_text(NOT_BOUND_TEXT)
             return
 
         self._purge_inline_at_contexts()
@@ -641,6 +711,10 @@ class TGhandlers:
     @staticmethod
     async def _can_forward_sender(msg: Message, bot_id: int | None) -> bool:
         sender = msg.from_user
+        # 匿名管理员的 from_user 是 GroupAnonymousBot（is_bot 为真），但它是群成员
+        # 以群身份发言，不是其他 Bot，直接放行、不受 bot_forward 开关约束。
+        if is_anonymous_sender(msg):
+            return True
         if sender is None or not getattr(sender, "is_bot", False):
             return True
         if bot_id is not None and sender.id == bot_id:
@@ -649,24 +723,19 @@ class TGhandlers:
 
     async def undo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """撤回被回复消息在 Telegram 和 OneBot 两侧的对应消息。"""
-        msg = update.effective_message
-        chat = update.effective_chat
-        user = update.effective_user
-        if msg is None or chat is None or user is None:
+        context_group = await self._require_group_context(update)
+        if context_group is None:
             return
-        if chat.type not in {"group", "supergroup"}:
-            await msg.reply_text("请在 Telegram 群聊中使用此命令")
-            return
+        msg, chat, user = context_group
         target = msg.reply_to_message
         if target is None:
             await msg.reply_text("请回复需要撤回的消息后使用 /undo")
             return
         mapping = await sql.get_q_message(chat.id, target.message_id)
         if mapping is None:
-            await msg.reply_text("未找到该消息的跨平台映射")
+            await msg.reply_text(NO_MAPPING_TEXT)
             return
-        member = await context.bot.get_chat_member(chat.id, user.id)
-        is_admin = member.status in {ChatMember.ADMINISTRATOR, ChatMember.OWNER}
+        is_admin = await self._is_group_admin(context.bot, chat.id, user.id)
         # target 通常是 Bot 发出的转发消息，因此必须使用映射中保存的原始 TG 用户 ID。
         is_owner = mapping.tg_user_id == user.id
         if not is_admin and not is_owner:
@@ -685,34 +754,29 @@ class TGhandlers:
         if failures:
             await msg.reply_text("OneBot 撤回失败，消息可能超过两分钟或机器人权限不足")
             return
-        for index in range(0, len(mapping.tg_message_ids), 100):
+        for index in range(0, len(mapping.tg_message_ids), TELEGRAM_DELETE_BATCH):
             await context.bot.delete_messages(
                 chat_id=mapping.tg_chat_id,
-                message_ids=mapping.tg_message_ids[index : index + 100],
+                message_ids=mapping.tg_message_ids[index : index + TELEGRAM_DELETE_BATCH],
             )
         await msg.delete()
 
     async def unpin(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """取消被回复消息在 Telegram 的置顶和 OneBot 的精华状态。"""
-        msg = update.effective_message
-        chat = update.effective_chat
-        user = update.effective_user
-        if msg is None or chat is None or user is None:
+        context_group = await self._require_group_context(update)
+        if context_group is None:
             return
-        if chat.type not in {"group", "supergroup"}:
-            await msg.reply_text("请在 Telegram 群聊中使用此命令")
-            return
+        msg, chat, user = context_group
         target = msg.reply_to_message
         if target is None:
             await msg.reply_text("请回复需要取消置顶的消息后使用 /unpin")
             return
-        member = await context.bot.get_chat_member(chat.id, user.id)
-        if member.status not in {ChatMember.ADMINISTRATOR, ChatMember.OWNER}:
+        if not await self._is_group_admin(context.bot, chat.id, user.id):
             await msg.reply_text("只有群聊管理员可以取消置顶")
             return
         mapping = await sql.get_q_message(chat.id, target.message_id)
         if mapping is None:
-            await msg.reply_text("未找到该消息的跨平台映射")
+            await msg.reply_text(NO_MAPPING_TEXT)
             return
 
         failures, connected = await self._run_onebot_message_actions(
@@ -832,6 +896,7 @@ class TGhandlers:
                 or bool(
                     msg.from_user is not None
                     and getattr(msg.from_user, "is_bot", False)
+                    and not is_anonymous_sender(msg)
                 )
             ),
             forwarded_from=forward_origin_name(getattr(msg, "forward_origin", None)),
@@ -1000,7 +1065,7 @@ class TGhandlers:
             source.file_size is not None and source.file_size > limit
             for _, source, limit, _ in sources
         ):
-            raise ValueError("Telegram 媒体超过 20 MB，无法转发")
+            raise ValueError(f"Telegram 媒体超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
         if declared_size > TELEGRAM_ALBUM_BYTES_LIMIT:
             raise ValueError("Telegram 媒体组超过 100 MB 上限")
 
@@ -1022,7 +1087,7 @@ class TGhandlers:
                 # get_file 获取至少一小时有效的下载 URL 和更准确的文件元数据。
                 file = await source.get_file()
                 if file.file_size is not None and file.file_size > size_limit:
-                    raise ValueError("Telegram 媒体超过 20 MB，无法转发")
+                    raise ValueError(f"Telegram 媒体超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
                 if not file.file_path:
                     raise RuntimeError("Telegram 媒体缺少下载地址")
 
@@ -1052,10 +1117,10 @@ class TGhandlers:
                             # 先用响应头提前拒绝，再在读取 chunk 时核对实际总大小。
                             content_length = response.headers.get("content-length")
                             if content_length is not None and int(content_length) > size_limit:
-                                raise ValueError("Telegram 媒体超过 20 MB，无法转发")
+                                raise ValueError(f"Telegram 媒体超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
                             async for chunk in response.aiter_bytes(DOWNLOAD_CHUNK_SIZE):
                                 if content.size + len(chunk) > size_limit:
-                                    raise ValueError("Telegram 媒体超过 20 MB，无法转发")
+                                    raise ValueError(f"Telegram 媒体超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
                                 content.write(chunk)
                     except httpx.HTTPError:
                         # Telegram 文件 URL 包含 Bot Token，不能让 HTTPX 异常把 URL
@@ -1093,6 +1158,7 @@ class TGhandlers:
                 bot_forward_required=bool(
                     first.from_user is not None
                     and getattr(first.from_user, "is_bot", False)
+                    and not is_anonymous_sender(first)
                 ),
                 forwarded_from=next(
                     (
@@ -1152,17 +1218,12 @@ class TGhandlers:
             | filters.Document.ALL
             | filters.Sticker.ALL
         )
+        command_handlers: list[BaseHandler] = [
+            CommandHandler(spec.name, getattr(self, spec.handler_attr))
+            for spec in COMMAND_SPECS
+        ]
         return [
-            CommandHandler("start", self.start),
-            CommandHandler("bind", self.bind),
-            CommandHandler("unbind", self.unbind),
-            CommandHandler("forward", self.forward),
-            CommandHandler("bot_forward", self.bot_forward),
-            CommandHandler("id_show", self.id_show),
-            CommandHandler("at", self.at),
-            CommandHandler("undo", self.undo),
-            CommandHandler("unpin", self.unpin),
-            CommandHandler("status", self.get_status),
+            *command_handlers,
             InlineQueryHandler(self.inline_at, pattern=r"^at(?:\s|$)"),
             MessageHandler(
                 filters.ChatType.GROUPS & filters.TEXT & filters.COMMAND,

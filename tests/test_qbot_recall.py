@@ -7,6 +7,7 @@ from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from telegram import LinkPreviewOptions
 from telegram.ext import ExtBot
 
 from src.bus import MessageBus
@@ -194,6 +195,7 @@ class OneBotRecallTests(unittest.IsolatedAsyncioTestCase):
             chat_id=-100123,
             text="User[101]:\n123",
             reply_parameters=None,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
         )
         self.delete_messages.assert_awaited_once_with(
             chat_id=-100123,
