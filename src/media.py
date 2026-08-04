@@ -228,7 +228,7 @@ class MediaFile:
         # 普通创建路径自行申请一个全局文件名额。
         await media_item_budget.acquire()
         try:
-            file = SpooledTemporaryFile(  # noqa: SIM115
+            file = SpooledTemporaryFile(
                 max_size=SPOOL_MEMORY_LIMIT,
                 mode="w+b",
                 dir=str(ensure_temp_dir()),

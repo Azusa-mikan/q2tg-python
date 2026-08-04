@@ -30,6 +30,7 @@ from telegram import (
     Update,
     User,
 )
+from telegram.error import BadRequest, Forbidden
 from telegram.ext import (
     BaseHandler,
     CommandHandler,
@@ -64,7 +65,7 @@ from src.messages import (
     TelegramMessage,
     onebot_user_name,
 )
-from src.notice import enqueue_bridge_notice
+from src.notice import enqueue_bridge_notice, enqueue_telegram_notice
 from src.processing import media_processor
 from src.qbot import q_gateway
 from src.runtime_events import emit_runtime_event
@@ -309,7 +310,10 @@ class TGhandlers:
                     "请先将本 Bot 加入需要桥接的 Telegram 群聊，"
                     "并将 OneBot 机器人加入对应的 OneBot 群聊。\n\n"
                     "然后在 Telegram 群聊中发送：\n"
-                    "`/bind <OneBot 群号>`\n\n"
+                    "`/bind <OneBot 群号>`\n"
+                    "或在当前私聊中发送：\n"
+                    "`/bind <Telegram 聊天 ID> <OneBot 群号>`\n"
+                    "`/unbind <Telegram 聊天 ID或OneBot 群号>`\n\n"
                     "Copyright 2026 Azusa\\-mikan"
                 )
             )
@@ -329,24 +333,52 @@ class TGhandlers:
             f"你无权使用此机器人，请联系 [{admin_name}]({user_url})"
         )
 
-    async def bind(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """由管理员在当前 Telegram 群绑定一个 OneBot 群号。"""
-        context_group = await self._require_group_context(update)
-        if context_group is None:
+    async def bind(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """由管理员在目标 Telegram 群或私聊中建立群绑定。"""
+        msg = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if msg is None or chat is None or user is None:
             return
-        msg, chat, user = context_group
         if user.id != config.tgbot_admin:
             await msg.reply_text("只有管理员可以绑定群聊")
             return
         args = context.args or []
-        if len(args) != 1:
-            await msg.reply_text("用法：/bind <OneBot 群号>")
+        if chat.type in GROUP_CHAT_TYPES:
+            if len(args) != 1:
+                await msg.reply_text("用法：/bind <OneBot 群号>")
+                return
+            target_chat = chat
+            q_group_arg = args[0]
+        elif chat.type == "private":
+            if len(args) != 2:
+                await msg.reply_text("用法：/bind <Telegram 聊天 ID> <OneBot 群号>")
+                return
+            try:
+                tg_chat_id = int(args[0])
+            except ValueError:
+                await msg.reply_text("Telegram 聊天 ID 必须是整数")
+                return
+            try:
+                target_chat = await context.bot.get_chat(tg_chat_id)
+            except (BadRequest, Forbidden):
+                await msg.reply_text("无法访问指定的 Telegram 聊天")
+                return
+            if target_chat.type not in GROUP_CHAT_TYPES:
+                await msg.reply_text("指定的 Telegram 聊天不是群聊")
+                return
+            q_group_arg = args[1]
+        else:
+            await msg.reply_text("请在 Telegram 群聊或与 Bot 的私聊中使用此命令")
             return
 
         try:
-            q_group_id = int(args[0])
-        except ValueError as error:
-            await msg.reply_text(str(error))
+            q_group_id = int(q_group_arg)
+        except ValueError:
+            await msg.reply_text("OneBot 群号必须是整数")
+            return
+        if not target_chat.title:
+            await msg.reply_text("Telegram 群资料缺少标题")
             return
 
         groups = None
@@ -365,45 +397,102 @@ class TGhandlers:
 
         try:
             # Sql 会校验正整数和一对一冲突，不在 handler 中重复规则。
-            await sql.bind_group(q_group_id, chat.id)
+            await sql.bind_group(q_group_id, target_chat.id)
         except ValueError as error:
             await msg.reply_text(str(error))
             return
 
+        success_text = f"已绑定群 {group_name}"
         enqueue_bridge_notice(
-            partial(msg.reply_text, f"已绑定群 {group_name}"),
+            partial(msg.reply_text, success_text),
             q_gateway,
             q_group_id=q_group_id,
-            text=f"已绑定群 {chat.title}",
+            text=f"已绑定群 {target_chat.title}",
         )
+        if chat.type == "private":
+            enqueue_telegram_notice(
+                partial(
+                    context.bot.send_message,
+                    chat_id=target_chat.id,
+                    text=success_text,
+                )
+            )
 
-    async def unbind(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """解除当前 Telegram 群的双向绑定。"""
-        context_group = await self._require_group_context(update)
-        if context_group is None:
+    async def unbind(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """在群聊或私聊中解除指定群的双向绑定。"""
+        msg = update.effective_message
+        chat = update.effective_chat
+        user = update.effective_user
+        if msg is None or chat is None or user is None:
             return
-        msg, chat, user = context_group
         if user.id != config.tgbot_admin:
             await msg.reply_text("只有管理员可以解除绑定")
             return
-
-        q_group_id = await sql.get_q_group(chat.id)
-        if q_group_id is None:
-            await msg.reply_text(NOT_BOUND_TEXT)
+        args = context.args or []
+        if chat.type in GROUP_CHAT_TYPES:
+            if args:
+                await msg.reply_text("用法：/unbind")
+                return
+            tg_chat_id = chat.id
+            q_group_id = await sql.get_q_group(tg_chat_id)
+            if q_group_id is None:
+                await msg.reply_text(NOT_BOUND_TEXT)
+                return
+            target_chat = chat
+        elif chat.type == "private":
+            if len(args) != 1:
+                await msg.reply_text("用法：/unbind <Telegram 聊天 ID或OneBot 群号>")
+                return
+            try:
+                group_id = int(args[0])
+            except ValueError:
+                await msg.reply_text("群聊 ID 必须是整数")
+                return
+            if group_id < 0:
+                tg_chat_id = group_id
+                q_group_id = await sql.get_q_group(tg_chat_id)
+            elif group_id > 0:
+                q_group_id = group_id
+                tg_chat_id = await sql.get_tg_group(q_group_id)
+            else:
+                q_group_id = None
+                tg_chat_id = None
+            if q_group_id is None or tg_chat_id is None:
+                await msg.reply_text("未找到该群聊的绑定关系")
+                return
+            try:
+                target_chat = await context.bot.get_chat(tg_chat_id)
+            except (BadRequest, Forbidden):
+                await msg.reply_text("无法访问绑定的 Telegram 群聊")
+                return
+            if target_chat.type not in GROUP_CHAT_TYPES or not target_chat.title:
+                await msg.reply_text("绑定的 Telegram 聊天不是有效群聊")
+                return
+        else:
+            await msg.reply_text("请在 Telegram 群聊或与 Bot 的私聊中使用此命令")
             return
 
         group_name = await self._fetch_group_name(msg, q_group_id, "解除绑定")
         if group_name is None:
             return
 
-        await sql.unbind_tg_group(chat.id)
+        await sql.unbind_tg_group(tg_chat_id)
 
+        success_text = f"已解绑群 {group_name}"
         enqueue_bridge_notice(
-            partial(msg.reply_text, f"已解绑群 {group_name}"),
+            partial(msg.reply_text, success_text),
             q_gateway,
             q_group_id=q_group_id,
-            text=f"已解绑群 {chat.title}",
+            text=f"已解绑群 {target_chat.title}",
         )
+        if chat.type == "private":
+            enqueue_telegram_notice(
+                partial(
+                    context.bot.send_message,
+                    chat_id=target_chat.id,
+                    text=success_text,
+                )
+            )
 
     async def forward(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """查询或设置当前 Telegram 群到 OneBot 的转发开关。"""

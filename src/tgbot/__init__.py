@@ -80,7 +80,7 @@ class TGBot:
                     try:
                         await self.app.bot.set_my_commands(BOT_COMMANDS)
                         self._commands_registered = True
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         # 命令菜单只是可发现性增强，注册失败不能阻止桥接服务启动；
                         # 保持 False，使下一次 SnowLuma 重连时再次尝试。
                         baselog.exception("Telegram 命令列表注册失败")
@@ -100,7 +100,7 @@ class TGBot:
                 # BaseException 包含任务取消；启动任务被取消时同样必须释放 PTB 资源。
                 try:
                     await self._shutdown()
-                except BaseException as shutdown_error:  # noqa: BLE001
+                except BaseException as shutdown_error:
                     error.add_note(f"TGBot cleanup failed: {shutdown_error!r}")
                 raise
 

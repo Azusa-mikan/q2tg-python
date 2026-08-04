@@ -148,7 +148,7 @@ class ForwardPageBuilder:
                     continue
                 try:
                     nested_page = await self._create_page(nested_id, depth=depth + 1)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     baselog.exception("OneBot 内层合并转发页面创建失败")
                     baselog.warning(
                         "OneBot 内层合并转发使用占位内容: depth=%s",
@@ -175,7 +175,7 @@ class ForwardPageBuilder:
         async with self.stranger_lookup_slots:
             try:
                 stranger = await self.gateway.get_stranger_info(user_id)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 baselog.warning("OneBot 陌生人资料查询失败: user=%s", user_id)
                 name = None
             else:

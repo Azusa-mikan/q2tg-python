@@ -113,7 +113,7 @@ class MessageBus:
                     with runtime_work(item.label):
                         await item.send()
                     sent = True
-                except Exception as error:  # noqa: BLE001
+                except Exception as error:
                     action = item.failure_action(error)
                     emit_runtime_event("send.attempt_failed", item.label, error=error)
                     if action is FailureAction.DEFER:
@@ -163,7 +163,7 @@ class MessageBus:
         try:
             with runtime_work(task.label):
                 await task.on_failed(error)
-        except Exception:  # noqa: BLE001
+        except Exception:
             baselog.exception("发送任务最终失败后的处理失败: %s", task.label)
 
     async def _finalize(self, task: SendTask) -> bool:
@@ -171,7 +171,7 @@ class MessageBus:
             return True
         try:
             await task.finalize()
-        except Exception:  # noqa: BLE001
+        except Exception:
             baselog.exception("发送任务资源清理失败: %s", task.label)
             emit_runtime_event("send.finalize_failed", task.label)
             return False

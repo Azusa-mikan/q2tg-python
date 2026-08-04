@@ -205,7 +205,7 @@ async def _onebot_member_name(
             )
         else:
             member = await gateway.get_group_member_info(group_id, user_id)
-    except Exception:  # noqa: BLE001
+    except Exception:
         baselog.warning(
             "OneBot 群成员信息查询失败: group=%s user=%s",
             group_id,
@@ -509,7 +509,7 @@ async def forward_onebot_to_telegram(
             tg_message_ids=tuple(msg.tg_message_ids),
             q_user_id=msg.user_id,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         baselog.exception("Telegram 消息发送成功，但消息映射保存失败")
 
 
@@ -1319,7 +1319,7 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
             tg_message_ids=msg.message_ids,
             tg_user_id=msg.user_id,
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         baselog.exception("OneBot 消息发送成功，但消息映射保存失败")
 
 

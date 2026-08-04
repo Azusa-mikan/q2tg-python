@@ -48,13 +48,13 @@ class MediaProcessor:
                     await task.run()
                 transferred = True
                 emit_runtime_event("processing.succeeded", task.label)
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:
                 emit_runtime_event("processing.failed", task.label, error=error)
                 baselog.exception("媒体预处理失败: %s", task.label)
                 if task.on_error is not None:
                     try:
                         await task.on_error(error)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         baselog.exception("媒体预处理失败提示发送失败: %s", task.label)
             finally:
                 if not transferred:
@@ -76,7 +76,7 @@ class MediaProcessor:
     async def _cleanup(self, task: ProcessingTask) -> None:
         try:
             await task.cleanup()
-        except Exception:  # noqa: BLE001
+        except Exception:
             baselog.exception("媒体预处理资源清理失败: %s", task.label)
 
 

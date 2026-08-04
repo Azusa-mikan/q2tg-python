@@ -286,7 +286,7 @@ class CustomTestSession:
             try:
                 assert self._server is not None
                 self._server.run()
-            except Exception as error:  # noqa: BLE001
+            except Exception as error:
                 self._server_error = error
             finally:
                 self.collector.close()

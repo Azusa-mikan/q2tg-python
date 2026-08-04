@@ -288,15 +288,17 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 
 ## Telegram 命令
 
-`/start` 会根据私聊或群聊返回不同内容，`/status` 可在两种聊天中使用；其余桥接和管理
-命令应在 Telegram 群聊中使用：
+`/start` 会根据私聊或群聊返回不同内容，`/status`、`/bind` 和 `/unbind` 可在两种聊天中
+使用；其余桥接和管理命令应在 Telegram 群聊中使用：
 
 | 命令 | 权限 | 说明 |
 | --- | --- | --- |
 | `/start` | 所有人 | 群聊中显示运行状态；私聊中向配置的管理员显示桥接步骤，其他用户显示管理员联系方式 |
 | `/status` | 所有人 | 在私聊或群聊中显示进程 RSS、各消息队列长度及最近 30 次成功媒体转换的平均耗时 |
-| `/bind <OneBot 群号>` | 配置的 Bot 管理员 | 绑定当前 Telegram 群与 OneBot 群 |
-| `/unbind` | 配置的 Bot 管理员 | 解除当前群的绑定 |
+| `/bind <OneBot 群号>` | 配置的 Bot 管理员 | 在群聊中绑定当前 Telegram 群与 OneBot 群 |
+| `/bind <Telegram 聊天 ID> <OneBot 群号>` | 配置的 Bot 管理员 | 在私聊中绑定指定 Telegram 群与 OneBot 群 |
+| `/unbind` | 配置的 Bot 管理员 | 在群聊中解除当前群的绑定 |
+| `/unbind <Telegram 聊天 ID或OneBot 群号>` | 配置的 Bot 管理员 | 在私聊中按任一侧群 ID 解除绑定 |
 | `/forward [on\|off]` | Telegram 群管理员 | 查询或设置 Telegram 到 OneBot 的转发状态 |
 | `/bot_forward [on\|off]` | Telegram 群管理员 | 查询或设置其他 Bot 消息及用户发给其他 Bot 的命令是否转发到 OneBot |
 | `/id_show [on\|off]` | Telegram 群管理员 | 查询或设置 OneBot 用户及 @ 对象的数字 ID 显示 |
@@ -308,6 +310,9 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 
 ```text
 /bind 123456789
+/bind -1001234567890 123456789
+/unbind -1001234567890
+/unbind 123456789
 ```
 
 每个 OneBot 群和 Telegram 群只能参与一个绑定关系。

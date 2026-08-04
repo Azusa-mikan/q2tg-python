@@ -69,5 +69,5 @@ def emit_runtime_event(
     )
     try:
         observer(event)
-    except Exception:  # noqa: BLE001
+    except Exception:
         baselog.exception("运行时观察器处理事件失败: phase=%s label=%s", phase, label)
