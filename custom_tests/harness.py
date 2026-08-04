@@ -338,6 +338,8 @@ def _save_state(completed: list[str], *, completed_at: datetime | None = None) -
 
 def _completed_keys(state: dict[str, object]) -> list[str]:
     completed = state.get("completed")
+    if completed is None:
+        return []
     if not isinstance(completed, list) or not all(isinstance(key, str) for key in completed):
         raise RuntimeError("真实测试状态中的 completed 字段格式错误")
     known = {item.key for item in TEST_ITEMS}

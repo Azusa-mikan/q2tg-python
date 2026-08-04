@@ -119,6 +119,13 @@ def test_state_round_trip_filters_unknown_items(tmp_path: Path) -> None:
     assert _completed_keys(state) == ["text-q-to-tg"]
 
 
+def test_missing_state_file_starts_with_empty_progress(tmp_path: Path) -> None:
+    with patch("custom_tests.harness.STATE_PATH", tmp_path / "missing-state.json"):
+        state = _load_state()
+
+    assert _completed_keys(state) == []
+
+
 def test_state_ignores_legacy_suite_id() -> None:
     state = {
         "suite_id": "outdated-suite-id",

@@ -468,7 +468,7 @@ GET /healthz
 运行单元测试：
 
 ```bash
-uv run --locked python -W error::ResourceWarning -m unittest discover -s tests
+uv run --locked pytest
 ```
 
 `tests/test_database_integration.py` 默认跳过。需要验证 MySQL/MariaDB 或 PostgreSQL 时，
@@ -476,10 +476,10 @@ uv run --locked python -W error::ResourceWarning -m unittest discover -s tests
 
 ```bash
 Q2TG_TEST_DATABASE_URL=mysql://user:password@127.0.0.1:3306/q2tg_test \
-  uv run --locked python -m unittest tests.test_database_integration
+  uv run --locked pytest tests/test_database_integration.py
 
 Q2TG_TEST_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/q2tg_test \
-  uv run --locked python -m unittest tests.test_database_integration
+  uv run --locked pytest tests/test_database_integration.py
 ```
 
 > [!WARNING]
@@ -489,10 +489,22 @@ Q2TG_TEST_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/q2tg_test \
 运行静态检查：
 
 ```bash
-uv run --locked pyright main.py src tests
+uv run --locked pyright
 uv run --locked ruff check .
-uv run --locked python -m compileall -q main.py src tests
+uv run --locked python -m compileall -q main.py src tests custom_tests
 ```
+
+运行真实 OneBot/Telegram 交互验证：
+
+```bash
+uv run --locked pytest --custom-tests
+```
+
+真实验证会启动一次 Q2TG 服务并等待 OneBot WebSocket 连接，然后逐项提示需要在 OneBot
+或 Telegram 客户端执行的操作。每项最多等待一分钟；任一项失败后会停止后续项目并关闭
+服务。成功进度保存在 `tmp/custom-tests-state.json`，再次运行时会跳过已完成项目。全部项目
+完成后五分钟内禁止重复运行。测试期间不要启动另一个 Q2TG 实例，也不要执行当前提示以外的
+群聊操作。
 
 ## 鸣谢
 
