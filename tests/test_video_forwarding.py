@@ -712,11 +712,10 @@ class VideoForwardingTests(unittest.IsolatedAsyncioTestCase):
         album = bot.send_media_group.await_args.kwargs["media"]
         self.assertEqual(len(album), 3)
         self.assertEqual(album[0].caption, "OneBot User[1]:\n测试")
-        self.assertTrue(album[0].show_caption_above_media)
         self.assertIsNone(album[1].caption)
-        self.assertFalse(album[1].show_caption_above_media)
         self.assertIsNone(album[2].caption)
-        self.assertFalse(album[2].show_caption_above_media)
+        # Telegram 要求媒体组内所有项的 show_caption_above_media 一致，否则整组被拒。
+        self.assertTrue(all(item.show_caption_above_media for item in album))
         attach_uris = [item.media.attach_uri for item in album]
         self.assertTrue(all(uri and uri.startswith("attach://") for uri in attach_uris))
         self.assertEqual(len(set(attach_uris)), 3)

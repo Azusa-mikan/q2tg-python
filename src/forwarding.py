@@ -633,7 +633,9 @@ async def _forward_media_album(
                     ),
                     caption=media_caption if index == 0 else None,
                     parse_mode=parse_mode,
-                    show_caption_above_media=index == 0,
+                    # Telegram 要求媒体组内所有项的 show_caption_above_media 一致；
+                    # caption 只放首项，但该标志必须全组统一，否则整组被拒。
+                    show_caption_above_media=True,
                 )
                 for index, (content, (_, _, filename)) in enumerate(
                     zip(contents, media, strict=True)
