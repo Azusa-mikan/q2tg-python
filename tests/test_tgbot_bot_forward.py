@@ -159,6 +159,53 @@ class TelegramBotForwardTests(unittest.IsolatedAsyncioTestCase):
 
         video.get_file.assert_not_awaited()
 
+    async def test_anonymous_admin_is_forwarded_without_bot_forward_switch(self) -> None:
+        handler = TGhandlers()
+        bus = MessageBus()
+        message = SimpleNamespace(
+            message_id=700007,
+            chat_id=-700002,
+            from_user=SimpleNamespace(
+                id=1087968824,
+                full_name="Group",
+                is_bot=True,
+            ),
+            sender_chat=SimpleNamespace(id=-700002),
+            text="anonymous admin message",
+            forward_origin=None,
+            reply_to_message=None,
+        )
+        update = cast(Update, SimpleNamespace(effective_message=message))
+        context = cast(
+            ContextTypes.DEFAULT_TYPE,
+            SimpleNamespace(bot=SimpleNamespace(id=700004)),
+        )
+
+        with (
+            patch(
+                "src.tgbot.handlers.sql.get_tg_forward_enabled",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "src.tgbot.handlers.sql.get_bot_forward_enabled",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as get_bot_forward,
+            patch("src.tgbot.handlers.message_bus", bus),
+        ):
+            await handler.receive_message(update, context)
+
+        self.assertEqual(bus.onebot_queue.qsize(), 1)
+        task = await bus.onebot_queue.get()
+        assert isinstance(task, SendTask)
+        assert isinstance(task.send, partial)
+        forwarded = task.send.args[0]
+        self.assertEqual(forwarded.sender_name, "Group")
+        self.assertFalse(forwarded.bot_forward_required)
+        bus.onebot_queue.task_done()
+        get_bot_forward.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

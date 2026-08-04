@@ -167,6 +167,14 @@ def forward_origin_name(origin: MessageOrigin | None) -> str | None:
         )
     return None
 
+
+def is_anonymous_sender(msg: Message) -> bool:
+    """匿名管理员以群身份发言：sender_chat 即当前群，其 from_user 是
+    GroupAnonymousBot（is_bot 为真），但本质是群成员而非其他 Bot。"""
+    sender_chat = getattr(msg, "sender_chat", None)
+    return sender_chat is not None and sender_chat.id == msg.chat_id
+
+
 class TGhandlers:
     """Telegram 命令、文本和媒体入口集合。
 
@@ -703,6 +711,10 @@ class TGhandlers:
     @staticmethod
     async def _can_forward_sender(msg: Message, bot_id: int | None) -> bool:
         sender = msg.from_user
+        # 匿名管理员的 from_user 是 GroupAnonymousBot（is_bot 为真），但它是群成员
+        # 以群身份发言，不是其他 Bot，直接放行、不受 bot_forward 开关约束。
+        if is_anonymous_sender(msg):
+            return True
         if sender is None or not getattr(sender, "is_bot", False):
             return True
         if bot_id is not None and sender.id == bot_id:
@@ -884,6 +896,7 @@ class TGhandlers:
                 or bool(
                     msg.from_user is not None
                     and getattr(msg.from_user, "is_bot", False)
+                    and not is_anonymous_sender(msg)
                 )
             ),
             forwarded_from=forward_origin_name(getattr(msg, "forward_origin", None)),
@@ -1145,6 +1158,7 @@ class TGhandlers:
                 bot_forward_required=bool(
                     first.from_user is not None
                     and getattr(first.from_user, "is_bot", False)
+                    and not is_anonymous_sender(first)
                 ),
                 forwarded_from=next(
                     (
