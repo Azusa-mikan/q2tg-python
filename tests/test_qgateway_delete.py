@@ -6,11 +6,71 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import WebSocket
 
+from src.messages import OneBotResultUnknownError
 from src.qbot import QGateway
 
 
 @pytest.mark.asyncio
 class TestQGatewayDelete:
+    async def test_disconnect_after_action_send_reports_unknown_result(self) -> None:
+        websocket = SimpleNamespace(send_json=AsyncMock())
+        gateway = QGateway()
+        gateway.bind(cast(WebSocket, websocket))
+
+        task = asyncio.create_task(gateway.send_group_message(123, []))
+        while not websocket.send_json.await_count:
+            await asyncio.sleep(0)
+        gateway.unbind(cast(WebSocket, websocket))
+
+        with pytest.raises(OneBotResultUnknownError, match="执行结果未知"):
+            await task
+
+    async def test_disconnect_cancels_action_blocked_while_sending(self) -> None:
+        send_started = asyncio.Event()
+
+        async def send_json(data) -> None:
+            send_started.set()
+            await asyncio.Event().wait()
+
+        websocket = SimpleNamespace(send_json=AsyncMock(side_effect=send_json))
+        gateway = QGateway()
+        gateway.bind(cast(WebSocket, websocket))
+        action = asyncio.create_task(gateway.send_group_message(123, []))
+        await send_started.wait()
+
+        gateway.unbind(cast(WebSocket, websocket))
+
+        with pytest.raises(OneBotResultUnknownError, match="执行结果未知"):
+            await asyncio.wait_for(action, timeout=0.1)
+        await asyncio.wait_for(gateway.wait_pending(), timeout=0.1)
+
+    async def test_disconnect_unblocks_send_after_response_was_received(self) -> None:
+        send_started = asyncio.Event()
+
+        async def send_json(data) -> None:
+            send_started.set()
+            await asyncio.Event().wait()
+
+        websocket = SimpleNamespace(send_json=AsyncMock(side_effect=send_json))
+        gateway = QGateway()
+        gateway.bind(cast(WebSocket, websocket))
+        action = asyncio.create_task(gateway.send_group_message(123, []))
+        await send_started.wait()
+        request = websocket.send_json.await_args.args[0]
+        gateway.resolve_response(
+            {
+                "status": "ok",
+                "retcode": 0,
+                "data": {"message_id": 456},
+                "echo": request["echo"],
+            }
+        )
+
+        gateway.unbind(cast(WebSocket, websocket))
+
+        assert await asyncio.wait_for(action, timeout=0.1) == 456
+        await asyncio.wait_for(gateway.wait_pending(), timeout=0.1)
+
     async def test_delete_message_uses_delete_msg_action(self) -> None:
         websocket = SimpleNamespace(send_json=AsyncMock())
         gateway = QGateway()

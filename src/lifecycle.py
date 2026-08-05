@@ -1,8 +1,27 @@
 """关停路径共用的任务回收工具。"""
 
 import asyncio
+from collections.abc import Awaitable
 
 from src.log import baselog
+
+
+async def await_completion_on_cancel[T](operation: Awaitable[T]) -> T:
+    """外层取消时等待关键操作结束，再传播首次取消。"""
+    task = asyncio.ensure_future(operation)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        try:
+            task.result()
+        except BaseException as error:
+            cancelled.add_note(f"Cleanup operation failed: {error!r}")
+        raise
 
 
 async def await_cancelled(task: asyncio.Task[object], *, log_label: str | None = None) -> None:

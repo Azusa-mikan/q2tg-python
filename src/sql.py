@@ -21,6 +21,7 @@ from src.database_schema import (
     onebot_message_mappings,
     telegram_message_mappings,
 )
+from src.lifecycle import await_completion_on_cancel
 from src.sql_migrations import migrate_database
 
 MESSAGE_RETENTION = 30 * 24 * 60 * 60
@@ -212,7 +213,9 @@ class Sql:
         tg_message_ids: tuple[int, ...],
         q_user_id: int | None = None,
         tg_user_id: int | None = None,
-    ) -> None:
+        *,
+        replace_older_than: float | None = None,
+    ) -> bool:
         """保存 30 天有效的消息映射，并建立两侧全部 ID 的反向索引。"""
         if not q_message_ids:
             raise ValueError("OneBot 消息 ID 不能为空")
@@ -234,6 +237,17 @@ class Sql:
             )
             conflicts = set((await connection.execute(q_conflicts.union(tg_conflicts))).scalars())
             if conflicts:
+                if replace_older_than is not None:
+                    newest_expiry = await connection.scalar(
+                        sa.select(sa.func.max(message_mappings.c.expires_at)).where(
+                            message_mappings.c.id.in_(conflicts)
+                        )
+                    )
+                    if (
+                        newest_expiry is not None
+                        and newest_expiry > replace_older_than + MESSAGE_RETENTION
+                    ):
+                        return False
                 await connection.execute(
                     sa.delete(message_mappings).where(message_mappings.c.id.in_(conflicts))
                 )
@@ -275,6 +289,7 @@ class Sql:
                     for message_id in tg_message_ids
                 ],
             )
+        return True
 
     async def get_tg_message(
         self,
@@ -312,7 +327,9 @@ class Sql:
             raise RuntimeError("消息映射数据库已经加载")
         if self._is_sqlite and self._url.database:
             Path(self._url.database).parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(migrate_database, self._url)
+        await await_completion_on_cancel(
+            asyncio.to_thread(migrate_database, self._url)
+        )
         engine = create_async_engine(self._url, pool_pre_ping=True)
         if self._is_sqlite:
             event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)

@@ -12,7 +12,7 @@ from telegram.ext import ContextTypes
 
 from src.bus import MessageBus
 from src.config import config
-from src.messages import SendTask
+from src.messages import OneBotResultUnknownError, SendTask
 from src.sql import Sql
 from src.tgbot.handlers import TGhandlers
 
@@ -244,7 +244,9 @@ class TestBindingNotices:
         )
         context = SimpleNamespace(args=["123456789"])
         gateway = SimpleNamespace(
-            get_group_list=AsyncMock(side_effect=RuntimeError("OneBot failed")),
+            get_group_list=AsyncMock(
+                side_effect=OneBotResultUnknownError("result unknown")
+            ),
         )
 
         with (

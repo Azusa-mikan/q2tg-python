@@ -13,6 +13,7 @@ from secrets import token_urlsafe
 from tempfile import NamedTemporaryFile, SpooledTemporaryFile
 from typing import Any
 
+from src.lifecycle import await_completion_on_cancel
 from src.paths import ensure_temp_dir
 
 # Telegram Bot API 的云端 getFile 下载上限与媒体上传上限不同，必须分别维护。
@@ -77,6 +78,13 @@ async def communicate_media_process(
             await process.wait()
         raise
     return stdout or b"", stderr or b""
+
+
+async def run_media_thread[T](function: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """在线程操作真正结束后再向上传播外层任务取消。"""
+    return await await_completion_on_cancel(
+        asyncio.to_thread(function, *args, **kwargs)
+    )
 
 
 def replace_media_content(media: MediaFile, output_path: Path) -> None:
@@ -374,10 +382,10 @@ class MediaFile:
         if not self._memory_reserved:
             return
         reserved = self._memory_reserved
-        # 先清零再归还，保证异常或重入时不会重复归还同一笔额度。
-        self._memory_reserved = 0
         if not self._closed:
             self.file.rollover()
+        # rollover 失败时保留额度归属，后续 close 仍能正确归还。
+        self._memory_reserved = 0
         media_memory_budget.release(reserved)
 
     def fileno(self) -> int:

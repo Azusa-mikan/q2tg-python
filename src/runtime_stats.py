@@ -85,7 +85,7 @@ def _get_queue_sizes() -> QueueSizes:
         telegram_messages=message_bus.telegram_queue.qsize(),
         telegram_events=message_bus.telegram_event_queue.qsize(),
         telegram_system=message_bus.telegram_system_queue.qsize(),
-        retry=message_bus.retry_queue.qsize(),
+        retry=message_bus.retry_queue_size(),
         media_processing=media_processor.queue.qsize(),
     )
 

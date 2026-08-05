@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 
 from src.bus import message_bus
 from src.config import config
-from src.lifecycle import await_cancelled
+from src.lifecycle import await_cancelled, await_completion_on_cancel
 from src.log import baselog
 from src.messages import SendLane, SendTarget
 from src.qbot import q_gateway, receive_onebot_event
@@ -31,6 +31,60 @@ router = APIRouter()
 
 # QGateway 只维护一个活动 WebSocket，因此拒绝并发的第二个 SnowLuma 连接。
 connection_lock = asyncio.Lock()
+
+
+async def _cleanup_bridge(
+    consumers: dict[tuple[SendTarget, SendLane], asyncio.Task[None]],
+    onebot_download_client: httpx.AsyncClient,
+    telegram_download_client: httpx.AsyncClient,
+) -> None:
+    """排空连接级任务，并保证 PTB 和下载客户端最终关闭。"""
+    onebot_consumers = [
+        task
+        for (target, _), task in consumers.items()
+        if target is SendTarget.ONEBOT
+    ]
+    telegram_consumers = {
+        lane: task
+        for (target, lane), task in consumers.items()
+        if target is SendTarget.TELEGRAM
+    }
+    try:
+        await q_gateway.wait_pending()
+        for consumer in onebot_consumers:
+            consumer.cancel()
+        for consumer in onebot_consumers:
+            await await_cancelled(
+                consumer,
+                log_label="OneBot 发送消费者异常退出",
+            )
+
+        try:
+            await tgbot.stop()
+            for lane in telegram_consumers:
+                await message_bus.join(SendTarget.TELEGRAM, lane)
+            for lane in telegram_consumers:
+                await message_bus.stop_consumer(SendTarget.TELEGRAM, lane)
+            for consumer in telegram_consumers.values():
+                await consumer
+        finally:
+            for consumer in telegram_consumers.values():
+                if not consumer.done():
+                    consumer.cancel()
+            for consumer in telegram_consumers.values():
+                await await_cancelled(
+                    consumer,
+                    log_label="Telegram 发送消费者异常退出",
+                )
+    finally:
+        try:
+            await tgbot.shutdown()
+        finally:
+            tgbot.download_client = None
+            try:
+                await telegram_download_client.aclose()
+            finally:
+                await onebot_download_client.aclose()
 
 
 async def verify_snowluma_token(
@@ -85,6 +139,7 @@ async def snowluma_ws(websocket: WebSocket) -> None:
         )
         tgbot.download_client = telegram_download_client
         q_gateway.bind(websocket)
+        message_bus.resume_target(SendTarget.ONEBOT)
         consumers: dict[tuple[SendTarget, SendLane], asyncio.Task[None]] = {}
         try:
             await tgbot.run()
@@ -98,48 +153,21 @@ async def snowluma_ws(websocket: WebSocket) -> None:
             emit_runtime_event("bridge.ready", "onebot-websocket")
             while True:
                 data = await websocket.receive_json()
+                if not isinstance(data, dict):
+                    baselog.warning("丢弃非对象格式的 OneBot WebSocket JSON")
+                    continue
                 if q_gateway.resolve_response(data):
                     continue
                 await receive_onebot_event(data, tgbot.app.bot, onebot_download_client)
         except WebSocketDisconnect:
             baselog.warning("Snowluma 已断开连接")
         finally:
+            message_bus.pause_target(SendTarget.ONEBOT)
             q_gateway.unbind(websocket)
-            # OneBot worker 与当前连接绑定。取消时，正在执行的通用任务会进入
-            # retry_queue；尚未开始的任务继续留在 OneBot 队列等待下一次连接。
-            onebot_consumers = [
-                task
-                for (target, _), task in consumers.items()
-                if target is SendTarget.ONEBOT
-            ]
-            for consumer in onebot_consumers:
-                consumer.cancel()
-            for consumer in onebot_consumers:
-                await await_cancelled(consumer)
-            try:
-                # 停止 Telegram 生产新消息，但保留 Bot API 客户端供队列排空。
-                await tgbot.stop()
-            finally:
-                # OneBot reader 已停止，不会再产生 TG 任务。先等待其独立重试链路
-                # 稳定排空，再放停止信号，避免重试任务落到哨兵后面。
-                telegram_consumers = {
-                    lane: task
-                    for (target, lane), task in consumers.items()
-                    if target is SendTarget.TELEGRAM
-                }
-                for lane in telegram_consumers:
-                    await message_bus.join(SendTarget.TELEGRAM, lane)
-                for lane in telegram_consumers:
-                    await message_bus.stop_consumer(SendTarget.TELEGRAM, lane)
-                try:
-                    for consumer in telegram_consumers.values():
-                        await consumer
-                finally:
-                    try:
-                        await tgbot.shutdown()
-                    finally:
-                        tgbot.download_client = None
-                        try:
-                            await telegram_download_client.aclose()
-                        finally:
-                            await onebot_download_client.aclose()
+            await await_completion_on_cancel(
+                _cleanup_bridge(
+                    consumers,
+                    onebot_download_client,
+                    telegram_download_client,
+                )
+            )

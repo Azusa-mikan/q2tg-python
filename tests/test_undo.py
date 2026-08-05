@@ -9,7 +9,7 @@ import pytest_asyncio
 from telegram import ChatMember, Update
 from telegram.ext import ContextTypes
 
-from src.messages import OneBotConnectionError
+from src.messages import OneBotConnectionError, OneBotResultUnknownError
 from src.sql import Sql
 from src.tgbot.handlers import TGhandlers
 
@@ -119,12 +119,22 @@ class TestUndo:
             "OneBot 撤回失败，消息可能超过两分钟或机器人权限不足"
         )
 
-    async def test_onebot_disconnect_keeps_command_and_shows_error(self) -> None:
+    @pytest.mark.parametrize(
+        "delete_error",
+        [
+            OneBotConnectionError("disconnected"),
+            OneBotResultUnknownError("result unknown"),
+        ],
+    )
+    async def test_onebot_disconnect_keeps_command_and_shows_error(
+        self,
+        delete_error: Exception,
+    ) -> None:
         command, bot, gateway = await self._undo(
             user_id=10,
             original_user_id=10,
             status=ChatMember.MEMBER,
-            delete_error=OneBotConnectionError("disconnected"),
+            delete_error=delete_error,
         )
         gateway.delete_message.assert_awaited_once_with(99)
         bot.delete_messages.assert_not_awaited()

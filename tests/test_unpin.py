@@ -9,7 +9,7 @@ import pytest_asyncio
 from telegram import ChatMember, Update
 from telegram.ext import ContextTypes
 
-from src.messages import OneBotConnectionError
+from src.messages import OneBotConnectionError, OneBotResultUnknownError
 from src.sql import Sql
 from src.tgbot.handlers import TGhandlers
 
@@ -118,10 +118,20 @@ class TestUnpin:
             "OneBot 取消精华失败，机器人权限可能不足"
         )
 
-    async def test_onebot_disconnect_keeps_telegram_pins(self) -> None:
+    @pytest.mark.parametrize(
+        "action_error",
+        [
+            OneBotConnectionError("disconnected"),
+            OneBotResultUnknownError("result unknown"),
+        ],
+    )
+    async def test_onebot_disconnect_keeps_telegram_pins(
+        self,
+        action_error: Exception,
+    ) -> None:
         command, bot, gateway = await self._unpin(
             status=ChatMember.OWNER,
-            action_error=OneBotConnectionError("disconnected"),
+            action_error=action_error,
         )
 
         gateway.delete_essence_message.assert_awaited_once_with(-1_001)

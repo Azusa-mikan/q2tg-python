@@ -186,7 +186,7 @@ docker compose logs -f snowluma
 
 Compose 使用 bind mount 持久化以下目录：
 
-- `./q2tg-data`：默认 SQLite 数据库；使用外部数据库时仍可保留该挂载
+- `./q2tg-data`：默认 SQLite 数据库和消息映射补偿文件；使用外部数据库时仍须保留该挂载
 - `./snowluma-data`：SnowLuma 数据
 - `./snowluma-qq-config`：账号配置
 - `./snowluma-qq-data`：账号数据
@@ -330,6 +330,7 @@ ID 搜索已绑定 OneBot 群的成员；选择成员后会发送真正的 OneBo
 ## 数据与限制
 
 - 默认 SQLite 数据库位于 `data/q2tg.db`；Docker Compose 中对应 `/app/data/q2tg.db`
+- 数据库暂时不可用时，待补写的消息映射保存在 `data/pending-message-mappings.json`
 - 可通过 `Q2TG_DATABASE_URL` 使用 MySQL/MariaDB 或 PostgreSQL，URL 中必须包含数据库名
 - Docker 使用默认 SQLite 时应持久化 `/app/data`；外部数据库应按其自身方案备份和持久化
 - 消息映射默认保留 30 天
@@ -385,7 +386,7 @@ Telegram Bot 是否有读取和发送群消息所需的权限。
 - 不要公开 `.env`、Bot token 或 OneBot token
 - 建议仅向可信网络开放服务端口
 - 使用公网地址时建议通过 HTTPS 和可信反向代理提供服务
-- 定期备份 SQLite 的 `data/q2tg.db`，或按外部数据库的备份方案保护数据
+- 定期备份 `data` 目录；使用外部数据库时还应按其备份方案保护数据
 - token 泄露后应立即撤销并重新生成
 
 ## 本地开发与测试

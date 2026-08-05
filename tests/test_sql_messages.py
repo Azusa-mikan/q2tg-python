@@ -1,4 +1,6 @@
+import asyncio
 import sqlite3
+import threading
 import time
 from contextlib import closing
 from pathlib import Path
@@ -12,6 +14,31 @@ from src.sql import Sql
 
 @pytest.mark.asyncio
 class TestSqlMessage:
+    async def test_migration_finishes_before_load_cancellation_propagates(self) -> None:
+        with TemporaryDirectory() as directory:
+            started = threading.Event()
+            release = threading.Event()
+
+            def migrate(database_url) -> None:
+                started.set()
+                release.wait()
+
+            database = Sql(Path(directory) / "cancelled.sqlite3")
+            with patch("src.sql.migrate_database", side_effect=migrate):
+                loading = asyncio.create_task(database.load())
+                while not started.is_set():
+                    await asyncio.sleep(0)
+                loading.cancel()
+                await asyncio.sleep(0)
+                assert not loading.done()
+
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await loading
+
+            with pytest.raises(RuntimeError, match="尚未加载"):
+                await database.get_tg_group(810_001)
+
     async def test_application_setting_persists_and_updates(self) -> None:
         with TemporaryDirectory() as directory:
             path = Path(directory) / "settings.sqlite3"

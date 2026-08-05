@@ -12,6 +12,7 @@ from src.media import (
     communicate_media_process,
     decode_process_error,
     finalize_media,
+    run_media_thread,
     start_media_process,
     transcode_target,
 )
@@ -76,7 +77,7 @@ async def normalize_video_for_onebot(media: MediaFile, *, size_limit: int) -> No
                 f"Telegram 视频转码后超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT} 上限"
             )
 
-        await asyncio.to_thread(
+        await run_media_thread(
             finalize_media,
             media,
             output_path,

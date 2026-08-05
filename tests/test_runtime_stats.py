@@ -43,7 +43,7 @@ class TestRuntimeStats:
             patch.object(message_bus.telegram_queue, "qsize", return_value=4),
             patch.object(message_bus.telegram_event_queue, "qsize", return_value=5),
             patch.object(message_bus.telegram_system_queue, "qsize", return_value=6),
-            patch.object(message_bus.retry_queue, "qsize", return_value=7),
+            patch.object(message_bus, "retry_queue_size", return_value=7),
             patch.object(media_processor.queue, "qsize", return_value=8),
         ):
             assert _get_queue_sizes() == QueueSizes(

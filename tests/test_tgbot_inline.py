@@ -9,6 +9,7 @@ from telegram.ext import ContextTypes, InlineQueryHandler
 
 from src.tgbot.handlers import (
     INLINE_AT_CONTEXT_LIMIT,
+    INLINE_AT_MEMBER_LIMIT,
     INLINE_AT_TTL,
     InlineAtContext,
     InlineAtMemberSnapshot,
@@ -125,6 +126,40 @@ class TestTelegramInlineAt:
         assert len(set(urls)) == 1
         assert await_args.kwargs["cache_time"] == 0
         assert await_args.kwargs["is_personal"]
+
+    @pytest.mark.asyncio
+    async def test_inline_at_rejects_oversized_member_snapshot(self) -> None:
+        handler = TGhandlers()
+        handler._inline_at_contexts["example-token"] = InlineAtContext(
+            user_id=831_001,
+            tg_chat_id=-831_002,
+            q_group_id=831_003,
+            expires_at=200.0,
+        )
+        gateway = SimpleNamespace(
+            get_group_member_list=AsyncMock(
+                return_value=[{}] * (INLINE_AT_MEMBER_LIMIT + 1)
+            )
+        )
+        answer = AsyncMock()
+        inline_query = SimpleNamespace(
+            query="at example-token",
+            from_user=SimpleNamespace(id=831_001),
+            offset="",
+            answer=answer,
+        )
+
+        with (
+            patch("src.tgbot.handlers.q_gateway", gateway),
+            patch("src.tgbot.handlers.time.monotonic", return_value=100.0),
+        ):
+            await handler.inline_at(
+                cast(Update, SimpleNamespace(inline_query=inline_query)),
+                cast(ContextTypes.DEFAULT_TYPE, SimpleNamespace()),
+            )
+
+        answer.assert_awaited_once_with([], cache_time=0, is_personal=True)
+        assert handler._inline_at_member_snapshots == {}
 
     @pytest.mark.asyncio
     async def test_inline_at_rejects_other_user_and_expired_token(self) -> None:

@@ -9,6 +9,8 @@ from fastapi.responses import StreamingResponse
 
 from src.bus import message_bus
 from src.lifecycle import await_cancelled
+from src.log import baselog
+from src.mapping_outbox import mapping_outbox
 from src.media import MediaStream, media_cache
 from src.processing import media_processor
 from src.runtime_events import emit_runtime_event
@@ -21,8 +23,14 @@ async def purge_cache() -> None:
     """定期清除过期消息映射和媒体，避免纯惰性清理长期占用资源。"""
     while True:
         await asyncio.sleep(10)
-        await sql.purge_expired()
-        media_cache.purge_expired()
+        try:
+            await sql.purge_expired()
+        except Exception:
+            baselog.exception("过期消息映射清理失败")
+        try:
+            media_cache.purge_expired()
+        except Exception:
+            baselog.exception("过期媒体缓存清理失败")
 
 
 class MediaResponse(StreamingResponse):
@@ -57,13 +65,18 @@ async def lifespan(app: FastAPI):
 
     启动顺序：
     1. 打开并迁移数据库；
-    2. 启动数据库和媒体缓存的定时清理；
-    3. 启动重试调度器和单并发媒体预处理 worker。
+    2. 加载消息映射补偿文件；
+    3. 启动定时清理、重试调度、媒体预处理和映射补偿 worker。
 
     PTB、消息消费者和媒体下载客户端属于 SnowLuma 连接级资源，仅在通过认证的
     WebSocket 连接存续期间运行。
     """
     await sql.load()
+    try:
+        await mapping_outbox.load()
+    except BaseException:
+        await sql.close()
+        raise
     # TTL 清理独立运行，避免没有新请求时过期数据一直留在内存或临时磁盘。
     cache_purger = asyncio.create_task(purge_cache(), name="cache-purger")
     retry_dispatcher = asyncio.create_task(
@@ -74,6 +87,10 @@ async def lifespan(app: FastAPI):
         media_processor.run(),
         name="media-processing-worker",
     )
+    mapping_worker = asyncio.create_task(
+        mapping_outbox.run(),
+        name="message-mapping-outbox-worker",
+    )
     emit_runtime_event("service.ready", "uvicorn")
     try:
         yield
@@ -82,20 +99,25 @@ async def lifespan(app: FastAPI):
         cache_purger.cancel()
         retry_dispatcher.cancel()
         media_worker.cancel()
-        # 先并行取消上面三个后台任务，再逐个回收；任一任务回收失败也不跳过
+        mapping_worker.cancel()
+        # 先并行取消上面的后台任务，再逐个回收；任一任务回收失败也不跳过
         # 后续资源关闭。缓存清理任务在取消前失败时记录后继续，其余只吞取消。
         try:
             await await_cancelled(cache_purger, log_label="缓存定时清理任务异常退出")
             await await_cancelled(retry_dispatcher)
             await await_cancelled(media_worker)
+            await await_cancelled(mapping_worker)
         finally:
             await media_processor.close()
             media_cache.close()
             try:
                 await telegraph_client.close()
             finally:
-                await sql.close()
-                emit_runtime_event("service.stopped", "uvicorn")
+                try:
+                    await mapping_outbox.close()
+                finally:
+                    await sql.close()
+                    emit_runtime_event("service.stopped", "uvicorn")
 
 # FastAPI 是媒体 HTTP 接口和 SnowLuma WebSocket 路由的统一挂载入口。
 fapp = FastAPI(lifespan=lifespan)

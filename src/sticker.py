@@ -18,6 +18,7 @@ from src.media import (
     communicate_media_process,
     decode_process_error,
     finalize_media,
+    run_media_thread,
     start_media_process,
     transcode_target,
 )
@@ -38,14 +39,14 @@ async def static_sticker_to_png(media: MediaFile, *, size_limit: int) -> None:
     started_at = time.monotonic()
     async with transcode_target(".png") as output_path:
         try:
-            await asyncio.to_thread(_render_png, media, output_path)
+            await run_media_thread(_render_png, media, output_path)
         except (OSError, UnidentifiedImageError):
             raise ValueError("Telegram 静态贴纸转换失败") from None
         if output_path.stat().st_size > size_limit:
             raise ValueError(
                 f"Telegram 贴纸转换后超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT} 上限"
             )
-        await asyncio.to_thread(
+        await run_media_thread(
             finalize_media,
             media,
             output_path,
@@ -95,7 +96,7 @@ async def video_sticker_to_gif(media: MediaFile, *, size_limit: int) -> None:
             raise ValueError(
                 f"Telegram 贴纸转换后超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT} 上限"
             )
-        await asyncio.to_thread(
+        await run_media_thread(
             finalize_media,
             media,
             output_path,
@@ -159,7 +160,7 @@ async def tgs_sticker_to_gif(media: MediaFile) -> None:
                 missing_error="本地 TGS 贴纸转发需要安装 Docker",
                 failure_prefix="Docker TGS 贴纸转换失败",
             )
-        await asyncio.to_thread(
+        await run_media_thread(
             finalize_media,
             media,
             output_path,

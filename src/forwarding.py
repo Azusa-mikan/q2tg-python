@@ -23,7 +23,7 @@ from telegram import (
     ReplyParameters,
 )
 from telegram.constants import ParseMode
-from telegram.error import BadRequest, TimedOut
+from telegram.error import BadRequest, NetworkError
 from telegram.ext import ExtBot
 from telegram.helpers import escape_markdown
 
@@ -36,6 +36,13 @@ from src.face import (
     render_onebot_face,
 )
 from src.log import baselog
+from src.mapping_outbox import (
+    PendingMessageMapping,
+    database_values,
+    mapping_outbox,
+    newest_mapping,
+    newest_pending_mapping,
+)
 from src.media import (
     TELEGRAM_UPLOAD_LIMIT,
     TELEGRAM_UPLOAD_LIMIT_TEXT,
@@ -48,12 +55,14 @@ from src.messages import (
     ONEBOT_USER_NAME,
     FailureAction,
     MediaTooLargeError,
+    MessageMappingError,
     OneBotConnectionError,
     OneBotEssenceEvent,
     OneBotGroupBanEvent,
     OneBotGroupMemberEvent,
     OneBotMessage,
     OneBotPokeEvent,
+    OneBotResultUnknownError,
     OneBotSendError,
     SendLane,
     SendTarget,
@@ -228,6 +237,8 @@ def onebot_message_media(
     message: list[dict[Any, Any]],
 ) -> tuple[list[tuple[str, str, str]], list[str]]:
     """提取带 HTTP(S) 下载地址的媒体，并返回缺少地址的媒体类型。"""
+    # data.url 来自通过 token 认证的可信 OneBot 实现，且常指向 Docker 或局域网
+    # 地址，因此这里有意不做 SSRF 私网拦截；部署方必须保护 OneBot 连接凭据。
     media = []
     unavailable: list[str] = []
     for segment in message:
@@ -389,7 +400,13 @@ async def forward_onebot_to_telegram(
     gateway: QGateway | None = None,
 ) -> None:
     """将 OneBot 文本和图片按顺序发送到绑定的 Telegram 群。"""
-    if await sql.get_tg_message(msg.group_id, msg.message_id) is not None:
+    if msg.tg_forward_complete:
+        await _save_onebot_message_mapping(msg)
+        return
+    existing_mapping = await _get_tg_message(msg.group_id, msg.message_id)
+    if existing_mapping is not None:
+        msg.tg_chat_id = existing_mapping.tg_chat_id
+        msg.tg_message_ids.extend(existing_mapping.tg_message_ids)
         baselog.warning(
             "忽略已有 Telegram 映射的重复 OneBot 消息: group=%s message=%s",
             msg.group_id,
@@ -477,7 +494,7 @@ async def forward_onebot_to_telegram(
         )
     reply_parameters = None
     if msg.reply_message_id is not None:
-        reply_mapping = await sql.get_tg_message(msg.group_id, msg.reply_message_id)
+        reply_mapping = await _get_tg_message(msg.group_id, msg.reply_message_id)
         if reply_mapping is not None and reply_mapping.tg_message_ids:
             msg.reply_unavailable = False
             emit_runtime_event("capability.succeeded", "onebot.reply.mapped")
@@ -534,17 +551,23 @@ async def forward_onebot_to_telegram(
             msg, bot, client, group_id, media, caption, reply_parameters, parse_mode
         )
 
-    # 远端发送已经完成，本地映射失败不能触发 Telegram 重发。
-    try:
-        await sql.set_message_mapping(
+    msg.tg_forward_complete = True
+    await _save_onebot_message_mapping(msg)
+
+
+async def _save_onebot_message_mapping(msg: OneBotMessage) -> None:
+    if msg.tg_chat_id is None:
+        raise RuntimeError("Telegram 转发完成但缺少目标群 ID")
+    await _save_or_queue_message_mapping(
+        PendingMessageMapping(
             q_group_id=msg.group_id,
             q_message_ids=(msg.message_id,),
-            tg_chat_id=group_id,
+            tg_chat_id=msg.tg_chat_id,
             tg_message_ids=tuple(msg.tg_message_ids),
             q_user_id=msg.user_id,
-        )
-    except Exception:
-        baselog.exception("Telegram 消息发送成功，但消息映射保存失败")
+        ),
+        error_message="Telegram 消息发送成功，但消息映射保存失败",
+    )
 
 
 async def _forward_announcement(
@@ -801,7 +824,7 @@ async def recall_onebot_message_from_telegram(
 ) -> None:
     """根据 OneBot 消息映射删除 Telegram 侧的全部副本。"""
     if tg_chat_id is None or not tg_message_ids:
-        mapping = await sql.get_tg_message(q_group_id, q_message_id)
+        mapping = await _get_tg_message(q_group_id, q_message_id)
         if mapping is None:
             baselog.warning(
                 "OneBot 撤回事件没有可用的 Telegram 消息映射: group=%s message=%s",
@@ -823,7 +846,7 @@ async def forward_onebot_essence_to_telegram(
     bot: ExtBot[None],
 ) -> None:
     """把 OneBot 精华状态应用到映射中的全部 Telegram 消息。"""
-    mapping = await sql.get_tg_message(event.group_id, event.message_id)
+    mapping = await _get_tg_message(event.group_id, event.message_id)
     if mapping is None:
         baselog.warning(
             "OneBot 精华事件没有可用的 Telegram 消息映射: group=%s message=%s",
@@ -1255,10 +1278,14 @@ def _utf16_length(text: str) -> int:
 
 async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) -> None:
     """将 Telegram 文本或图片通过 OneBot action 发送到绑定的 OneBot 群。"""
+    if msg.q_forward_complete:
+        await _save_telegram_message_mapping(msg)
+        return
     group_id = await sql.get_q_group(msg.group_id)
     if group_id is None:
         baselog.warning("Telegram 群未配置转发目标: %s", msg.group_id)
         return
+    msg.q_group_id = group_id
     if not await sql.get_tg_forward_enabled(msg.group_id):
         return
     if msg.bot_forward_required and not await sql.get_bot_forward_enabled(msg.group_id):
@@ -1269,7 +1296,7 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
 
     reply_q_message_id = None
     if msg.reply_message_id is not None:
-        reply_mapping = await sql.get_q_message(msg.group_id, msg.reply_message_id)
+        reply_mapping = await _get_q_message(msg.group_id, msg.reply_message_id)
         if reply_mapping is not None and reply_mapping.q_message_ids:
             emit_runtime_event("capability.succeeded", "telegram.reply.mapped")
             reply_q_message_id = reply_mapping.q_message_ids[-1]
@@ -1339,21 +1366,84 @@ async def forward_telegram_to_onebot(msg: TelegramMessage, gateway: QGateway) ->
             )
         except OneBotConnectionError:
             raise
+        except OneBotResultUnknownError:
+            raise
         except Exception as error:
             raise OneBotSendError from error
         msg.q_message_ids.append(message_id)
         msg.next_onebot_batch = index + 1
 
-    try:
-        await sql.set_message_mapping(
-            q_group_id=group_id,
+    msg.q_forward_complete = True
+    await _save_telegram_message_mapping(msg)
+
+
+async def _save_telegram_message_mapping(msg: TelegramMessage) -> None:
+    if msg.q_group_id is None:
+        raise RuntimeError("OneBot 转发完成但缺少目标群 ID")
+    await _save_or_queue_message_mapping(
+        PendingMessageMapping(
+            q_group_id=msg.q_group_id,
             q_message_ids=tuple(msg.q_message_ids),
             tg_chat_id=msg.group_id,
             tg_message_ids=msg.message_ids,
             tg_user_id=msg.user_id,
-        )
+        ),
+        error_message="OneBot 消息发送成功，但消息映射保存失败",
+    )
+
+
+async def _save_or_queue_message_mapping(
+    mapping: PendingMessageMapping,
+    *,
+    error_message: str,
+) -> None:
+    try:
+        await sql.set_message_mapping(**database_values(mapping))
+    except Exception as database_error:
+        try:
+            await mapping_outbox.enqueue(mapping)
+        except Exception as outbox_error:
+            outbox_error.add_note(f"Database mapping write failed: {database_error!r}")
+            raise MessageMappingError(error_message) from outbox_error
+        baselog.exception("%s，已加入本地补偿队列", error_message)
+
+
+async def _get_tg_message(q_group_id: int, q_message_id: int):
+    pending_before = mapping_outbox.get_tg_message(q_group_id, q_message_id)
+    try:
+        mapping = await sql.get_tg_message(q_group_id, q_message_id)
     except Exception:
-        baselog.exception("OneBot 消息发送成功，但消息映射保存失败")
+        pending = newest_pending_mapping(
+            pending_before,
+            mapping_outbox.get_tg_message(q_group_id, q_message_id),
+        )
+        if pending is None:
+            raise
+        return pending
+    pending = newest_pending_mapping(
+        pending_before,
+        mapping_outbox.get_tg_message(q_group_id, q_message_id),
+    )
+    return newest_mapping(mapping, pending)
+
+
+async def _get_q_message(tg_chat_id: int, tg_message_id: int):
+    pending_before = mapping_outbox.get_q_message(tg_chat_id, tg_message_id)
+    try:
+        mapping = await sql.get_q_message(tg_chat_id, tg_message_id)
+    except Exception:
+        pending = newest_pending_mapping(
+            pending_before,
+            mapping_outbox.get_q_message(tg_chat_id, tg_message_id),
+        )
+        if pending is None:
+            raise
+        return pending
+    pending = newest_pending_mapping(
+        pending_before,
+        mapping_outbox.get_q_message(tg_chat_id, tg_message_id),
+    )
+    return newest_mapping(mapping, pending)
 
 
 async def forward_telegram_pin_to_onebot(
@@ -1362,7 +1452,7 @@ async def forward_telegram_pin_to_onebot(
     gateway: QGateway,
 ) -> None:
     """把 Telegram 置顶应用到映射中的全部 OneBot 消息。"""
-    mapping = await sql.get_q_message(tg_chat_id, tg_message_id)
+    mapping = await _get_q_message(tg_chat_id, tg_message_id)
     if mapping is None:
         baselog.warning(
             "Telegram 置顶事件没有可用的 OneBot 消息映射: chat=%s message=%s",
@@ -1414,6 +1504,8 @@ async def forward_telegram_group_member_to_onebot(
             message=[{"type": "text", "data": {"text": text}}],
         )
     except OneBotConnectionError:
+        raise
+    except OneBotResultUnknownError:
         raise
     except Exception as error:
         raise OneBotSendError from error
@@ -1473,14 +1565,18 @@ def _onebot_failure_action(error: Exception) -> FailureAction:
     """把 OneBot 连接状态和业务失败映射为通用总线动作。"""
     if isinstance(error, OneBotConnectionError):
         return FailureAction.DEFER
+    if isinstance(error, OneBotResultUnknownError):
+        return FailureAction.DROP
     if isinstance(error, OneBotSendError):
+        return FailureAction.RETRY
+    if isinstance(error, MessageMappingError):
         return FailureAction.RETRY
     return FailureAction.DROP
 
 
 def _telegram_failure_action(error: Exception) -> FailureAction:
     """只重试结果明确未成功的错误，避免超时后重复发送。"""
-    if isinstance(error, (MediaTooLargeError, TimedOut)):
+    if isinstance(error, (MediaTooLargeError, NetworkError)):
         return FailureAction.DROP
     return FailureAction.RETRY
 
@@ -1507,6 +1603,29 @@ async def _disable_forwarding(
         )
         return
 
+    if isinstance(error, MessageMappingError):
+        enqueue_telegram_notice(
+            partial(
+                bot.send_message,
+                chat_id=msg.group_id,
+                text="消息已发送到 OneBot，但消息映射保存失败，请检查数据库。",
+            )
+        )
+        return
+
+    if isinstance(error, OneBotResultUnknownError):
+        enqueue_telegram_notice(
+            partial(
+                bot.send_message,
+                chat_id=msg.group_id,
+                text=(
+                    "消息发送到 OneBot 的结果未知，为避免重复发送未自动重试，"
+                    "请检查 OneBot 群。"
+                ),
+            )
+        )
+        return
+
     enqueue_telegram_notice(
         partial(
             bot.send_message,
@@ -1524,21 +1643,24 @@ async def _notify_onebot_telegram_failure(
     """Telegram 任务耗尽后只向来源 OneBot 群发送失败提示。"""
     if isinstance(error, MediaTooLargeError):
         emit_runtime_event("capability.succeeded", "onebot.media.rejected")
-    text = (
-        str(error)
-        if isinstance(error, MediaTooLargeError)
-        else (
+        text = str(error)
+        label = f"onebot-media-rejected:{msg.group_id}:{msg.message_id}"
+    elif isinstance(error, MessageMappingError):
+        text = "消息已发送到 Telegram，但消息映射保存失败，请检查数据库。"
+        label = f"onebot-mapping-failed:{msg.group_id}:{msg.message_id}"
+    else:
+        text = (
             "消息发送到 Telegram 超时，发送结果未知；为避免重复发送未自动重试，"
             "请检查 Telegram 群。"
-            if isinstance(error, TimedOut)
+            if isinstance(error, NetworkError)
             else "消息转发到 Telegram 连续失败 3 次，请稍后重试。"
         )
-    )
+        label = f"onebot-forward-failed:{msg.group_id}:{msg.message_id}"
     enqueue_onebot_notice(
         gateway,
         q_group_id=msg.group_id,
         text=text,
-        label=f"onebot-media-rejected:{msg.group_id}:{msg.message_id}",
+        label=label,
     )
 
 

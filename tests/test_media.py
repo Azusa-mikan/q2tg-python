@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from pathlib import Path
 from tempfile import SpooledTemporaryFile, TemporaryDirectory
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from src.media import (
     media_item_budget,
     media_memory_budget,
     replace_media_content,
+    run_media_thread,
 )
 
 
@@ -181,6 +183,47 @@ class TestMediaFile:
         finally:
             media.close()
         assert media_memory_budget.used == initial_memory
+
+    async def test_rollover_failure_releases_memory_budget_on_close(self) -> None:
+        initial_memory = media_memory_budget.used
+        media = await MediaFile.create(
+            filename="image.jpg",
+            media_type="image/jpeg",
+            expected_size=3 * 1024 * 1024,
+        )
+        reserved = media._memory_reserved
+        try:
+            with (
+                patch.object(media.file, "rollover", side_effect=OSError("disk full")),
+                pytest.raises(OSError, match="disk full"),
+            ):
+                media.leave_memory_tier()
+            assert media._memory_reserved == reserved
+        finally:
+            media.close()
+        assert media_memory_budget.used == initial_memory
+
+    async def test_cancelled_media_thread_finishes_before_propagating(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        finished = threading.Event()
+
+        def work() -> None:
+            started.set()
+            release.wait()
+            finished.set()
+
+        operation = asyncio.create_task(run_media_thread(work))
+        while not started.is_set():
+            await asyncio.sleep(0)
+        operation.cancel()
+        await asyncio.sleep(0)
+        assert not operation.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+        assert finished.is_set()
 
     async def test_memory_budget_never_blocks(self) -> None:
         budget = MemoryBudget(10)

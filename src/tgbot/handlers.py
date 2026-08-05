@@ -50,6 +50,7 @@ from src.forwarding import (
     telegram_processing_task,
 )
 from src.log import baselog
+from src.mapping_outbox import mapping_outbox, newest_mapping, newest_pending_mapping
 from src.media import (
     TELEGRAM_DOWNLOAD_LIMIT,
     TELEGRAM_DOWNLOAD_LIMIT_TEXT,
@@ -58,8 +59,13 @@ from src.media import (
     media_queue_budget,
 )
 from src.messages import (
+    ONEBOT_SEND_FAILED_TEXT,
     ONEBOT_USER_NAME,
     OneBotConnectionError,
+    OneBotResultUnknownError,
+    SendTarget,
+    SendTargetUnavailableError,
+    SendTask,
     TelegramGroupMemberEvent,
     TelegramMedia,
     TelegramMessage,
@@ -80,6 +86,7 @@ INLINE_AT_TTL = 5 * 60
 INLINE_AT_PAGE_SIZE = 50
 INLINE_AT_CONTEXT_LIMIT = 256
 INLINE_AT_SNAPSHOT_LIMIT = 64
+INLINE_AT_MEMBER_LIMIT = 3_000
 INLINE_AT_SELECTION_LIMIT = 4096
 INLINE_AT_URL_PREFIX = "https://q2tg.invalid/token/"
 INLINE_AT_MARKER = "\u2063"
@@ -211,6 +218,15 @@ class TGhandlers:
         self._inline_at_selection_tokens: dict[tuple[str, int], str] = {}
 
     @staticmethod
+    async def _put_onebot_task(msg: Message, task: SendTask) -> bool:
+        try:
+            await message_bus.put(task)
+        except SendTargetUnavailableError:
+            await msg.reply_text(ONEBOT_SEND_FAILED_TEXT)
+            return False
+        return True
+
+    @staticmethod
     async def _require_group_context(
         update: Update,
     ) -> tuple[Message, Chat, User] | None:
@@ -284,7 +300,13 @@ class TGhandlers:
             group_name = group.get("group_name")
             if not isinstance(group_name, str) or not group_name:
                 raise TypeError(f"OneBot 群资料缺少 group_name: {group!r}")
-        except (OneBotConnectionError, RuntimeError, TimeoutError, TypeError):
+        except (
+            OneBotConnectionError,
+            OneBotResultUnknownError,
+            RuntimeError,
+            TimeoutError,
+            TypeError,
+        ):
             baselog.exception("%s时查询 OneBot 群资料失败: %s", action, q_group_id)
             await msg.reply_text(ONEBOT_ERROR_TEXT)
             return None
@@ -383,7 +405,12 @@ class TGhandlers:
         groups = None
         try:
             groups = await q_gateway.get_group_list()
-        except (OneBotConnectionError, RuntimeError, TimeoutError):
+        except (
+            OneBotConnectionError,
+            OneBotResultUnknownError,
+            RuntimeError,
+            TimeoutError,
+        ):
             baselog.exception("绑定群聊时查询 OneBot 群列表失败: %s", q_group_id)
             await msg.reply_text(ONEBOT_ERROR_TEXT)
             return
@@ -624,8 +651,18 @@ class TGhandlers:
                 self._inline_at_member_snapshots.pop(
                     next(iter(self._inline_at_member_snapshots))
                 )
+            members = await q_gateway.get_group_member_list(inline_context.q_group_id)
+            if len(members) > INLINE_AT_MEMBER_LIMIT:
+                baselog.error(
+                    "OneBot 群成员列表超过缓存上限: group=%s members=%s limit=%s",
+                    inline_context.q_group_id,
+                    len(members),
+                    INLINE_AT_MEMBER_LIMIT,
+                )
+                await inline_query.answer([], cache_time=0, is_personal=True)
+                return
             members_snapshot = InlineAtMemberSnapshot(
-                members=await q_gateway.get_group_member_list(inline_context.q_group_id),
+                members=members,
                 expires_at=time.monotonic() + INLINE_AT_TTL,
             )
             self._inline_at_member_snapshots[inline_context.q_group_id] = members_snapshot
@@ -831,7 +868,23 @@ class TGhandlers:
         if target is None:
             await msg.reply_text("请回复需要撤回的消息后使用 /undo")
             return
-        mapping = await sql.get_q_message(chat.id, target.message_id)
+        pending_before = mapping_outbox.get_q_message(chat.id, target.message_id)
+        try:
+            mapping = await sql.get_q_message(chat.id, target.message_id)
+        except Exception:
+            pending = newest_pending_mapping(
+                pending_before,
+                mapping_outbox.get_q_message(chat.id, target.message_id),
+            )
+            if pending is None:
+                raise
+            mapping = pending
+        else:
+            pending = newest_pending_mapping(
+                pending_before,
+                mapping_outbox.get_q_message(chat.id, target.message_id),
+            )
+            mapping = newest_mapping(mapping, pending)
         if mapping is None:
             await msg.reply_text(NO_MAPPING_TEXT)
             return
@@ -875,7 +928,23 @@ class TGhandlers:
         if not await self._is_group_admin(context.bot, chat.id, user.id):
             await msg.reply_text("只有群聊管理员可以取消置顶")
             return
-        mapping = await sql.get_q_message(chat.id, target.message_id)
+        pending_before = mapping_outbox.get_q_message(chat.id, target.message_id)
+        try:
+            mapping = await sql.get_q_message(chat.id, target.message_id)
+        except Exception:
+            pending = newest_pending_mapping(
+                pending_before,
+                mapping_outbox.get_q_message(chat.id, target.message_id),
+            )
+            if pending is None:
+                raise
+            mapping = pending
+        else:
+            pending = newest_pending_mapping(
+                pending_before,
+                mapping_outbox.get_q_message(chat.id, target.message_id),
+            )
+            mapping = newest_mapping(mapping, pending)
         if mapping is None:
             await msg.reply_text(NO_MAPPING_TEXT)
             return
@@ -907,7 +976,7 @@ class TGhandlers:
         for message_id in message_ids:
             try:
                 await action(message_id)
-            except OneBotConnectionError:
+            except (OneBotConnectionError, OneBotResultUnknownError):
                 return failures, False
             except RuntimeError:
                 failures += 1
@@ -1006,7 +1075,10 @@ class TGhandlers:
                 msg.reply_to_message.message_id if msg.reply_to_message is not None else None
             ),
         )
-        await message_bus.put(telegram_forward_task(message, q_gateway, context.bot))
+        await self._put_onebot_task(
+            msg,
+            telegram_forward_task(message, q_gateway, context.bot),
+        )
 
     async def receive_command(
         self,
@@ -1031,8 +1103,9 @@ class TGhandlers:
         if msg.from_user is not None and msg.from_user.id == context.bot.id:
             # OneBot 精华同步触发的 Telegram 服务消息不能再次回传。
             return
-        await message_bus.put(
-            telegram_pin_task(msg.chat_id, msg.pinned_message.message_id, q_gateway)
+        await self._put_onebot_task(
+            msg,
+            telegram_pin_task(msg.chat_id, msg.pinned_message.message_id, q_gateway),
         )
 
     async def receive_group_member(
@@ -1052,7 +1125,8 @@ class TGhandlers:
             joined = False
         else:
             return
-        await message_bus.put(
+        await self._put_onebot_task(
+            msg,
             telegram_group_member_task(
                 TelegramGroupMemberEvent(
                     group_id=msg.chat_id,
@@ -1060,7 +1134,7 @@ class TGhandlers:
                     joined=joined,
                 ),
                 q_gateway,
-            )
+            ),
         )
 
     async def receive_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1070,7 +1144,7 @@ class TGhandlers:
             return
         if msg.media_group_id is None:
             try:
-                await self._enqueue_media([msg], context.bot.id)
+                await self._enqueue_media_while_connected([msg], context.bot.id)
             except ValueError as error:
                 await msg.reply_text(str(error))
                 emit_runtime_event(
@@ -1098,7 +1172,10 @@ class TGhandlers:
             messages = self._albums.pop(media_group_id, [])
             if messages:
                 try:
-                    await self._enqueue_media(messages, messages[0].get_bot().id)
+                    await self._enqueue_media_while_connected(
+                        messages,
+                        messages[0].get_bot().id,
+                    )
                 except ValueError as error:
                     await messages[0].reply_text(str(error))
                     emit_runtime_event(
@@ -1110,6 +1187,19 @@ class TGhandlers:
             # 取消可能发生在聚合窗口内，此时还没有 pop 相册消息。
             self._albums.pop(media_group_id, None)
             self._album_tasks.pop(media_group_id, None)
+
+    async def _enqueue_media_while_connected(
+        self,
+        messages: list[Message],
+        bot_id: int | None,
+    ) -> None:
+        try:
+            await message_bus.run_while_target_available(
+                SendTarget.ONEBOT,
+                self._enqueue_media(messages, bot_id),
+            )
+        except SendTargetUnavailableError as error:
+            raise ValueError(ONEBOT_SEND_FAILED_TEXT) from error
 
     async def _enqueue_media(self, messages: list[Message], bot_id: int | None = None) -> None:
         """下载一组 Telegram 媒体，取得资源预算后放入消息队列。
@@ -1332,9 +1422,12 @@ class TGhandlers:
                 if not media_processor.submit(task):
                     raise ValueError("Telegram 媒体处理队列已满，请稍后重试")
             else:
-                await message_bus.put(
-                    telegram_forward_task(message, q_gateway, first.get_bot())
-                )
+                try:
+                    await message_bus.put(
+                        telegram_forward_task(message, q_gateway, first.get_bot())
+                    )
+                except SendTargetUnavailableError as error:
+                    raise ValueError(ONEBOT_SEND_FAILED_TEXT) from error
         except BaseException:
             # BaseException 包含任务取消；关停时取消相册任务也必须关闭临时文件，
             # 并归还已经取得但尚未使用的两类预算。

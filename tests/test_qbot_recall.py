@@ -207,3 +207,61 @@ class TestOneBotRecall:
             chat_id=-100123,
             message_ids=(88,),
         )
+
+    @pytest.mark.asyncio
+    async def test_recall_during_duplicate_mapped_event_uses_existing_mapping(self) -> None:
+        message_id = -1002
+        await self.sql.set_message_mapping(
+            q_group_id=123,
+            q_message_ids=(message_id,),
+            tg_chat_id=-100123,
+            tg_message_ids=(89,),
+            q_user_id=101,
+        )
+        event = {
+            "post_type": "message",
+            "message_type": "group",
+            "sub_type": "normal",
+            "self_id": 102,
+            "user_id": 101,
+            "group_id": 123,
+            "message_id": message_id,
+            "sender": {"nickname": "Example User", "card": ""},
+            "message": [{"type": "text", "data": {"text": "message"}}],
+        }
+        recall = {
+            "post_type": "notice",
+            "notice_type": "group_recall",
+            "group_id": 123,
+            "message_id": message_id,
+        }
+
+        with (
+            patch("src.qbot.message_bus", self.bus),
+            patch("src.bus.message_bus", self.bus),
+            patch("src.forwarding.sql", self.sql),
+        ):
+            await receive_onebot_event(event, self.bot, self.client)
+            await receive_onebot_event(recall, self.bot, self.client)
+            message_consumer = asyncio.create_task(
+                self.bus.consume(SendTarget.TELEGRAM, SendLane.MESSAGE)
+            )
+            event_consumer = asyncio.create_task(
+                self.bus.consume(SendTarget.TELEGRAM, SendLane.EVENT)
+            )
+            try:
+                await self.bus.join(SendTarget.TELEGRAM, SendLane.MESSAGE)
+                await self.bus.join(SendTarget.TELEGRAM, SendLane.EVENT)
+            finally:
+                message_consumer.cancel()
+                event_consumer.cancel()
+                await asyncio.gather(
+                    message_consumer,
+                    event_consumer,
+                    return_exceptions=True,
+                )
+
+        self.delete_messages.assert_awaited_once_with(
+            chat_id=-100123,
+            message_ids=(89,),
+        )

@@ -30,6 +30,7 @@ from src.messages import (
     OneBotGroupMemberEvent,
     OneBotMessage,
     OneBotPokeEvent,
+    OneBotResultUnknownError,
 )
 from src.notice import enqueue_onebot_notice
 from src.runtime_events import emit_runtime_event
@@ -46,6 +47,7 @@ class QGateway:
     def __init__(self) -> None:
         self._websocket: WebSocket | None = None
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        self._pending_tasks: dict[str, asyncio.Task[Any]] = {}
 
     def bind(self, websocket: WebSocket) -> None:
         """记录当前唯一活动的 SnowLuma WebSocket。"""
@@ -58,9 +60,13 @@ class QGateway:
             return
 
         self._websocket = None
-        for future in self._pending.values():
-            if not future.done():
-                future.set_exception(OneBotConnectionError("OneBot WebSocket 已断开"))
+        for task in self._pending_tasks.values():
+            task.cancel()
+
+    async def wait_pending(self) -> None:
+        """等待断线时已唤醒的 action 调用离开 pending 集合。"""
+        while self._pending:
+            await asyncio.sleep(0)
 
     def resolve_response(self, data: dict[str, Any]) -> bool:
         """若 JSON 是已知 echo 的响应，则唤醒对应发送协程并返回 True。"""
@@ -201,27 +207,47 @@ class QGateway:
         params: dict[str, Any],
     ) -> dict[str, Any]:
         """发送带唯一 echo 的 OneBot action，并校验通用响应外壳。"""
-        if self._websocket is None:
+        websocket = self._websocket
+        if websocket is None:
             raise OneBotConnectionError("OneBot WebSocket 尚未连接")
 
         echo = uuid4().hex
         # Future 不执行工作，只是让发送协程等待接收循环稍后填入响应。
         future = asyncio.get_running_loop().create_future()
+        action_task = asyncio.current_task()
+        if action_task is None:
+            raise RuntimeError("OneBot action 缺少当前异步任务")
         self._pending[echo] = future
+        self._pending_tasks[echo] = action_task
         try:
             try:
-                await self._websocket.send_json(
+                await websocket.send_json(
                     {
                         "action": action,
                         "params": params,
                         "echo": echo,
                     }
                 )
+                response = await asyncio.wait_for(future, timeout=10)
+            except TimeoutError:
+                raise OneBotResultUnknownError("OneBot action 响应超时，执行结果未知") from None
+            except asyncio.CancelledError:
+                if self._websocket is not websocket:
+                    if future.done() and not future.cancelled():
+                        response = future.result()
+                    else:
+                        raise OneBotResultUnknownError(
+                            "OneBot WebSocket 已断开，action 执行结果未知"
+                        ) from None
+                else:
+                    raise
             except Exception as error:
-                raise OneBotConnectionError("OneBot WebSocket 发送失败") from error
-            response = await asyncio.wait_for(future, timeout=10)
+                raise OneBotResultUnknownError(
+                    "OneBot WebSocket 发送失败，action 执行结果未知"
+                ) from error
         finally:
             self._pending.pop(echo, None)
+            self._pending_tasks.pop(echo, None)
             if not future.done():
                 future.cancel()
 

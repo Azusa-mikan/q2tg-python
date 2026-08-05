@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from src.media import MediaFile
 
 ONEBOT_USER_NAME = "OneBot 用户"
+ONEBOT_SEND_FAILED_TEXT = "消息发送到 OneBot 失败，请稍后重试。"
 
 
 def is_http_url(value: str) -> bool:
@@ -72,6 +73,8 @@ class OneBotMessage:
     telegraph_pages: dict[str, TelegraphPageRef] = field(default_factory=dict)
     # 群公告文件名跨 Telegram 发送重试复用，避免每次尝试生成不同名称。
     announcement_filename: str | None = None
+    # 远端发送完成后，映射写入失败的重试只能再次写库，不能重复发送。
+    tg_forward_complete: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -157,6 +160,8 @@ class TelegramMessage:
     queue_bytes: int = 0
     q_message_ids: list[int] = field(default_factory=list)
     next_onebot_batch: int = 0
+    q_group_id: int | None = None
+    q_forward_complete: bool = False
 
 
 class SendTarget(Enum):
@@ -208,6 +213,18 @@ class OneBotSendError(Exception):
 
 class OneBotConnectionError(Exception):
     """SnowLuma WebSocket 不可用于发送。"""
+
+
+class OneBotResultUnknownError(Exception):
+    """OneBot action 已开始，但响应丢失，执行结果未知。"""
+
+
+class SendTargetUnavailableError(Exception):
+    """发送目标在生产者等待队列空间期间停止。"""
+
+
+class MessageMappingError(Exception):
+    """远端发送完成后，本地消息映射保存失败。"""
 
 
 class MediaTooLargeError(Exception):
