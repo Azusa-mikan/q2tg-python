@@ -334,7 +334,10 @@ ID 搜索已绑定 OneBot 群的成员；选择成员后会发送真正的 OneBo
 - Docker 使用默认 SQLite 时应持久化 `/app/data`；外部数据库应按其自身方案备份和持久化
 - 消息映射默认保留 30 天
 - 合并转发页面由 Telegraph 托管，不受本地消息映射保留时间控制
-- 单个下载媒体的大小上限为 20 MB
+- OneBot 发往 Telegram 的单个媒体上限为 50 MB；图片超过 10 MB 时作为文件发送
+- Telegram 发往 OneBot 的单个媒体下载上限为 20 MB
+- OneBot 发往 Telegram 的图片组合计上限为 49 MiB；云端 Bot API 对单次请求体的上限为
+  50 MiB，超出会返回 413
 - 视频、语音和贴纸转换依赖 ffmpeg、ffprobe、Pillow、pilk 与
   [lottie-converter](https://github.com/ed-asriyan/lottie-converter)
 - TGS 输入仍受 Telegram Bot API 下载上限限制；转换后的 GIF 不设置额外大小上限
@@ -369,8 +372,8 @@ Telegram Bot 是否有读取和发送群消息所需的权限。
 
 ### 图片或视频转发失败
 
-检查媒体是否超过 20 MB、`Q2TG_ONEBOT_MEDIA_URL` 是否可访问，以及系统中的 ffmpeg 和
-ffprobe 是否可用。
+检查 OneBot 发往 Telegram 的媒体是否超过 50 MB、Telegram 发往 OneBot 的媒体是否超过
+20 MB，并确认 `Q2TG_ONEBOT_MEDIA_URL` 可访问，以及系统中的 ffmpeg 和 ffprobe 可用。
 
 ### Docker 容器无法写入 SQLite 数据库
 

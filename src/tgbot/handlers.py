@@ -51,8 +51,8 @@ from src.forwarding import (
 )
 from src.log import baselog
 from src.media import (
-    MEDIA_SIZE_LIMIT,
-    MEDIA_SIZE_LIMIT_TEXT,
+    TELEGRAM_DOWNLOAD_LIMIT,
+    TELEGRAM_DOWNLOAD_LIMIT_TEXT,
     MediaFile,
     media_item_budget,
     media_queue_budget,
@@ -72,7 +72,6 @@ from src.runtime_events import emit_runtime_event
 from src.runtime_stats import get_runtime_info
 from src.sql import sql
 
-TELEGRAM_DOWNLOAD_LIMIT = MEDIA_SIZE_LIMIT
 TELEGRAM_VIDEO_LIMIT = TELEGRAM_DOWNLOAD_LIMIT
 TELEGRAM_ALBUM_LIMIT = 10
 TELEGRAM_ALBUM_BYTES_LIMIT = 100_000_000
@@ -1194,7 +1193,9 @@ class TGhandlers:
             source.file_size is not None and source.file_size > limit
             for _, source, limit, _ in sources
         ):
-            raise ValueError(f"Telegram 媒体超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
+            raise ValueError(
+                f"Telegram 媒体超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT}，无法转发"
+            )
         if declared_size > TELEGRAM_ALBUM_BYTES_LIMIT:
             raise ValueError("Telegram 媒体组超过 100 MB 上限")
 
@@ -1216,7 +1217,9 @@ class TGhandlers:
                 # get_file 获取至少一小时有效的下载 URL 和更准确的文件元数据。
                 file = await source.get_file()
                 if file.file_size is not None and file.file_size > size_limit:
-                    raise ValueError(f"Telegram 媒体超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
+                    raise ValueError(
+                        f"Telegram 媒体超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT}，无法转发"
+                    )
                 if not file.file_path:
                     raise RuntimeError("Telegram 媒体缺少下载地址")
 
@@ -1235,7 +1238,12 @@ class TGhandlers:
                         "record": "audio/ogg",
                         "video": "video/mp4",
                     }.get(kind, "application/octet-stream")
-                content = MediaFile.create_reserved(filename=filename, media_type=media_type)
+                # file_size 来自 get_file，用于决定内存分档；缺失时沿用默认阈值。
+                content = MediaFile.create_reserved(
+                    filename=filename,
+                    media_type=media_type,
+                    expected_size=file.file_size,
+                )
                 # create_reserved 消耗的是上面批量取得的名额。每成功创建一个，
                 # reserved_items 就减少一个，异常清理时只归还尚未使用的名额。
                 reserved_items -= 1
@@ -1246,10 +1254,14 @@ class TGhandlers:
                             # 先用响应头提前拒绝，再在读取 chunk 时核对实际总大小。
                             content_length = response.headers.get("content-length")
                             if content_length is not None and int(content_length) > size_limit:
-                                raise ValueError(f"Telegram 媒体超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
+                                raise ValueError(
+                                    f"Telegram 媒体超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT}，无法转发"
+                                )
                             async for chunk in response.aiter_bytes(DOWNLOAD_CHUNK_SIZE):
                                 if content.size + len(chunk) > size_limit:
-                                    raise ValueError(f"Telegram 媒体超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
+                                    raise ValueError(
+                                        f"Telegram 媒体超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT}，无法转发"
+                                    )
                                 content.write(chunk)
                     except httpx.HTTPError:
                         # Telegram 文件 URL 包含 Bot Token，不能让 HTTPX 异常把 URL
@@ -1271,12 +1283,6 @@ class TGhandlers:
             total_size = sum(attachment.content.size for attachment in media)
             if total_size > TELEGRAM_ALBUM_BYTES_LIMIT:
                 raise ValueError("Telegram 媒体组超过 100 MB 上限")
-            if 90_000_000 <= total_size <= TELEGRAM_ALBUM_BYTES_LIMIT:
-                emit_runtime_event(
-                    "capability.succeeded",
-                    "telegram.media-group.bytes-boundary",
-                    work_id=work_id,
-                )
             needs_processing = any(
                 attachment.processing != "none" for attachment in media
             )

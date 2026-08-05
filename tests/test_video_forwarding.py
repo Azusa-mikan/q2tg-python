@@ -16,7 +16,13 @@ from src.forwarding import (
     onebot_message_media,
 )
 from src.media import MediaFile, media_cache, media_item_budget
-from src.messages import OneBotMessage, OneBotSendError, TelegramMedia, TelegramMessage
+from src.messages import (
+    MediaTooLargeError,
+    OneBotMessage,
+    OneBotSendError,
+    TelegramMedia,
+    TelegramMessage,
+)
 from src.qbot import QGateway
 from src.sql import Sql
 
@@ -779,6 +785,112 @@ class TestVideoForwarding:
         mapping = await self.database.get_tg_message(123, 107)
         assert mapping is not None
         assert mapping.tg_message_ids == (401, 402, 403)
+
+    async def test_onebot_image_album_over_request_body_limit_is_rejected(self) -> None:
+        # 云端 Bot API 实测阈值为 50 MiB 请求体；10 张合计 53.30 MiB 会返回
+        # 413 Request Entity Too Large，因此发送前必须按合计字节数拦截。
+        contents = []
+        for index in range(3):
+            content = await MediaFile.create(
+                filename=f"large-{index}.jpg",
+                media_type="image/jpeg",
+            )
+            content.size = 20 * 1024 * 1024
+            contents.append(content)
+        bot = SimpleNamespace(send_media_group=AsyncMock())
+        message = OneBotMessage(
+            message_id=109,
+            group_id=123,
+            user_id=1,
+            sender_name="OneBot User",
+            message=[
+                {
+                    "type": "image",
+                    "data": {
+                        "file": f"large-{index}.jpg",
+                        "url": f"https://example.test/large-{index}",
+                    },
+                }
+                for index in range(3)
+            ],
+        )
+
+        async with httpx.AsyncClient() as client:
+            with (
+                patch("src.forwarding.sql", self.database),
+                patch(
+                    "src.forwarding.download_media",
+                    new_callable=AsyncMock,
+                    side_effect=contents,
+                ),
+                pytest.raises(MediaTooLargeError, match="图片组超过 49 MiB"),
+            ):
+                await forward_onebot_to_telegram(
+                    message,
+                    cast(ExtBot[None], bot),
+                    client,
+                )
+
+        bot.send_media_group.assert_not_awaited()
+        # 第三张就已超限，最后一张不应被下载。
+        assert contents[2].file.closed
+        assert all(content.file.closed for content in contents)
+
+    async def test_onebot_image_album_just_under_request_body_limit_is_sent(self) -> None:
+        # 49.89 MiB 实测通过，因此贴近上限但未超出的图片组必须照常发送。
+        contents = []
+        for index in range(3):
+            content = await MediaFile.create(
+                filename=f"edge-{index}.jpg",
+                media_type="image/jpeg",
+            )
+            content.size = 16 * 1024 * 1024
+            contents.append(content)
+        bot = SimpleNamespace(
+            send_media_group=AsyncMock(
+                return_value=[
+                    SimpleNamespace(message_id=501),
+                    SimpleNamespace(message_id=502),
+                    SimpleNamespace(message_id=503),
+                ]
+            ),
+        )
+        message = OneBotMessage(
+            message_id=110,
+            group_id=123,
+            user_id=1,
+            sender_name="OneBot User",
+            message=[
+                {
+                    "type": "image",
+                    "data": {
+                        "file": f"edge-{index}.jpg",
+                        "url": f"https://example.test/edge-{index}",
+                    },
+                }
+                for index in range(3)
+            ],
+        )
+
+        async with httpx.AsyncClient() as client:
+            with (
+                patch("src.forwarding.sql", self.database),
+                patch(
+                    "src.forwarding.download_media",
+                    new_callable=AsyncMock,
+                    side_effect=contents,
+                ),
+            ):
+                await forward_onebot_to_telegram(
+                    message,
+                    cast(ExtBot[None], bot),
+                    client,
+                )
+
+        bot.send_media_group.assert_awaited_once()
+        # 每张 16 MiB 超过 sendPhoto 的 10 MB，整组应作为文件组发送。
+        album = bot.send_media_group.await_args.kwargs["media"]
+        assert [item.type for item in album] == ["document"] * 3
 
     async def test_onebot_video_without_url_sends_mapped_placeholder(self) -> None:
         bot = SimpleNamespace(

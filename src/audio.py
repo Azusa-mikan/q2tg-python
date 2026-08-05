@@ -10,8 +10,8 @@ from pathlib import Path
 from src.log import baselog
 from src.media import (
     FFMPEG_BASE_ARGS,
-    MEDIA_SIZE_LIMIT,
-    MEDIA_SIZE_LIMIT_TEXT,
+    TELEGRAM_UPLOAD_LIMIT,
+    TELEGRAM_UPLOAD_LIMIT_TEXT,
     MediaFile,
     communicate_media_process,
     decode_process_error,
@@ -23,7 +23,7 @@ from src.messages import MediaTooLargeError
 from src.runtime_events import emit_runtime_event
 
 SILK_SAMPLE_RATE = 24000
-RECORD_SIZE_LIMIT = MEDIA_SIZE_LIMIT
+RECORD_SIZE_LIMIT = TELEGRAM_UPLOAD_LIMIT
 PROBE_TIMEOUT = 30
 TRANSCODE_TIMEOUT = 120
 SILK_HEADERS = (b"#!SILK_V3", b"\x02#!SILK_V3")
@@ -50,7 +50,7 @@ os.execvp(sys.argv[2], sys.argv[2:])
 
 
 async def normalize_onebot_record(media: MediaFile) -> None:
-    """识别 OneBot 语音格式，并原地规范化为不超过 20 MB 的 Ogg/Opus。"""
+    """识别 OneBot 语音格式，并原地规范化为不超过 50 MB 的 Ogg/Opus。"""
     started_at = time.monotonic()
     async with transcode_target(".pcm") as pcm_path, transcode_target(".ogg") as output_path:
         if _is_silk(media):
@@ -68,7 +68,7 @@ async def normalize_onebot_record(media: MediaFile) -> None:
                 media.rewind()
                 emit_runtime_event("capability.succeeded", "onebot.voice.compatible")
                 return
-            input_fd = media.file.fileno()
+            input_fd = media.fileno()
             media.rewind()
             await _transcode_to_ogg(
                 input_path=f"/proc/self/fd/{input_fd}",
@@ -78,7 +78,9 @@ async def normalize_onebot_record(media: MediaFile) -> None:
 
         output_size = output_path.stat().st_size
         if output_size > RECORD_SIZE_LIMIT:
-            raise MediaTooLargeError(f"OneBot 语音转码后超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
+            raise MediaTooLargeError(
+                f"OneBot 语音转码后超过 {TELEGRAM_UPLOAD_LIMIT_TEXT}，无法转发"
+            )
         if output_size == 0 or not _is_ogg_file(output_path):
             raise ValueError("OneBot 语音转码未生成有效的 Ogg 文件")
         finalize_media(media, output_path, stem_fallback="voice", suffix=".ogg", media_type="audio/ogg")
@@ -87,7 +89,7 @@ async def normalize_onebot_record(media: MediaFile) -> None:
 
 
 async def _decode_silk(media: MediaFile, pcm_path: Path) -> None:
-    input_fd = media.file.fileno()
+    input_fd = media.fileno()
     media.rewind()
     process = await start_media_process(
         sys.executable,
@@ -108,13 +110,15 @@ async def _decode_silk(media: MediaFile, pcm_path: Path) -> None:
     if process.returncode == -signal.SIGXFSZ or (
         process.returncode != 0 and pcm_size >= RECORD_SIZE_LIMIT
     ):
-        raise MediaTooLargeError(f"OneBot SILK 解码后超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
+        raise MediaTooLargeError(
+            f"OneBot SILK 解码后超过 {TELEGRAM_UPLOAD_LIMIT_TEXT}，无法转发"
+        )
     if process.returncode != 0:
         raise ValueError(f"OneBot SILK 语音解码失败: {decode_process_error(stderr)}")
 
 
 async def _probe_audio(media: MediaFile) -> tuple[str, str]:
-    input_fd = media.file.fileno()
+    input_fd = media.fileno()
     media.rewind()
     process = await start_media_process(
         "ffprobe",
@@ -198,7 +202,9 @@ async def _transcode_to_ogg(
     if process.returncode == -signal.SIGXFSZ or (
         process.returncode != 0 and output_size >= RECORD_SIZE_LIMIT
     ):
-        raise MediaTooLargeError(f"OneBot 语音转码后超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
+        raise MediaTooLargeError(
+            f"OneBot 语音转码后超过 {TELEGRAM_UPLOAD_LIMIT_TEXT}，无法转发"
+        )
     if process.returncode != 0:
         raise ValueError(f"OneBot 语音转码失败: {decode_process_error(stderr)}")
 

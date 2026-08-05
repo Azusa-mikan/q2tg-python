@@ -174,7 +174,7 @@ class TestForwardTasks:
             cast(httpx.AsyncClient, SimpleNamespace()),
             gateway,
         )
-        error = MediaTooLargeError("OneBot 媒体超过 20 MB，无法转发")
+        error = MediaTooLargeError("OneBot 媒体超过 50 MB，无法转发")
 
         assert task.failure_action(error) is FailureAction.DROP
         with patch("src.forwarding.enqueue_onebot_notice") as notice:
@@ -184,7 +184,7 @@ class TestForwardTasks:
         notice.assert_called_once_with(
             gateway,
             q_group_id=123,
-            text="OneBot 媒体超过 20 MB，无法转发",
+            text="OneBot 媒体超过 50 MB，无法转发",
             label="onebot-media-rejected:123:1",
         )
 

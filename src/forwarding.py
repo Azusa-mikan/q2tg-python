@@ -37,10 +37,11 @@ from src.face import (
 )
 from src.log import baselog
 from src.media import (
-    MEDIA_SIZE_LIMIT,
-    MEDIA_SIZE_LIMIT_TEXT,
+    TELEGRAM_UPLOAD_LIMIT,
+    TELEGRAM_UPLOAD_LIMIT_TEXT,
     MediaFile,
     media_cache,
+    media_item_budget,
     media_queue_budget,
 )
 from src.messages import (
@@ -79,7 +80,15 @@ if TYPE_CHECKING:
     from src.qbot import QGateway
 
 PHOTO_LIMIT = 10_000_000
-ONEBOT_MEDIA_LIMIT = MEDIA_SIZE_LIMIT
+ONEBOT_MEDIA_LIMIT = TELEGRAM_UPLOAD_LIMIT
+# 云端 Bot API 对单次 multipart 请求体的上限实测为 50 MiB：10 张合计 49.89 MiB
+# 通过，50.17 MiB 返回 413 Request Entity Too Large。该上限约束整个请求体，
+# 而不是单项，因此媒体组必须按合计字节数拦截。
+TELEGRAM_REQUEST_BODY_LIMIT = 50 * 1024 * 1024
+# 为 multipart 边界、每项头部、caption 与 media JSON 留出余量；10 项时这部分
+# 实际开销不足 10 KB，1 MiB 足够覆盖。
+ONEBOT_ALBUM_BYTES_LIMIT = TELEGRAM_REQUEST_BODY_LIMIT - 1024 * 1024
+ONEBOT_ALBUM_BYTES_LIMIT_TEXT = f"{ONEBOT_ALBUM_BYTES_LIMIT // (1024 * 1024)} MiB"
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
 MAX_SEND_ATTEMPTS = 3
 UNAVAILABLE_REPLY_TEXT = "[回复了一个无法读取的消息]"
@@ -309,7 +318,11 @@ async def download_media(
         "record": "audio/silk",
         "video": "video/mp4",
     }.get(kind, "application/octet-stream")
-    media = await MediaFile.create(filename=filename, media_type=fallback_type)
+    # spool 需要 Content-Length 才能决定内存分档，所以文件要等到读出响应头才创建。
+    # 但文件名额必须在建立连接之前取得：ItemBudget.acquire() 会等待，若放到流内部，
+    # 名额耗尽时就会挂着一条已打开的 OneBot 连接干等。
+    await media_item_budget.acquire()
+    media: MediaFile | None = None
     try:
         try:
             async with client.stream("GET", url) as response:
@@ -317,24 +330,45 @@ async def download_media(
                 response_type = response.headers.get("content-type", "").partition(";")[
                     0
                 ]
-                if response_type:
-                    media.media_type = response_type
                 content_length = response.headers.get("content-length")
-                if (
-                    content_length is not None
-                    and int(content_length) > ONEBOT_MEDIA_LIMIT
-                ):
-                    raise MediaTooLargeError(f"OneBot 媒体超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
+                declared_size = (
+                    int(content_length) if content_length is not None else None
+                )
+                if declared_size is not None and declared_size > ONEBOT_MEDIA_LIMIT:
+                    raise MediaTooLargeError(
+                        f"OneBot 媒体超过 {TELEGRAM_UPLOAD_LIMIT_TEXT}，无法转发"
+                    )
+                # 名额已在上面取得，这里用同步的 create_reserved 消耗它。
+                media = MediaFile.create_reserved(
+                    filename=filename,
+                    media_type=response_type or fallback_type,
+                    expected_size=declared_size,
+                )
                 async for chunk in response.aiter_bytes(DOWNLOAD_CHUNK_SIZE):
                     if media.size + len(chunk) > ONEBOT_MEDIA_LIMIT:
-                        raise MediaTooLargeError(f"OneBot 媒体超过 {MEDIA_SIZE_LIMIT_TEXT}，无法转发")
+                        raise MediaTooLargeError(
+                            f"OneBot 媒体超过 {TELEGRAM_UPLOAD_LIMIT_TEXT}，无法转发"
+                        )
                     media.write(chunk)
+                media.rewind()
+                baselog.info(
+                    "OneBot 媒体下载完成：kind=%s filename=%s 实际 %d 字节"
+                    "（声明 %s，类型 %s）",
+                    kind,
+                    media.filename,
+                    media.size,
+                    declared_size if declared_size is not None else "未提供",
+                    media.media_type,
+                )
+                return media
         except httpx.HTTPError:
             raise RuntimeError("OneBot 媒体下载失败") from None
-        media.rewind()
-        return media
     except BaseException:
-        media.close()
+        if media is not None:
+            # MediaFile 已接管名额，关闭时归还。
+            media.close()
+        else:
+            media_item_budget.release()
         raise
 
 
@@ -642,14 +676,13 @@ async def _forward_media_album(
                     kind=kind,
                 )
             )
+            # 逐张累计判断，超限时立即停止，不再继续下载后续图片。
+            if sum(content.size for content in contents) > ONEBOT_ALBUM_BYTES_LIMIT:
+                raise MediaTooLargeError(
+                    f"OneBot 图片组超过 {ONEBOT_ALBUM_BYTES_LIMIT_TEXT}，无法转发"
+                )
         as_animations = any(_is_gif(content) for content in contents)
         as_photos = all(content.size <= PHOTO_LIMIT for content in contents)
-        total_size = sum(content.size for content in contents)
-        if 90_000_000 <= total_size <= 100_000_000:
-            emit_runtime_event(
-                "capability.succeeded",
-                "onebot.image-album.bytes-boundary",
-            )
         album: list[InputMediaPhoto | InputMediaDocument] = []
         if as_animations:
             await _send_downloaded_media_individually(

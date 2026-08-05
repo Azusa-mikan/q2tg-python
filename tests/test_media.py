@@ -9,11 +9,15 @@ import pytest
 from telegram import InputFile
 
 from src.media import (
+    MEDIA_MEMORY_TIER_LIMIT,
     SPOOL_MEMORY_LIMIT,
     ByteBudget,
     MediaFile,
+    MemoryBudget,
     communicate_media_process,
     media_item_budget,
+    media_memory_budget,
+    replace_media_content,
 )
 
 
@@ -51,6 +55,141 @@ class TestMediaFile:
         finally:
             media.close()
         assert media_item_budget.used == initial_items
+
+    async def test_unknown_expected_size_keeps_legacy_memory_path(self) -> None:
+        # 没有 Content-Length 时不预留额度，行为与分档前完全一致。
+        initial_memory = media_memory_budget.used
+        media = await MediaFile.create(filename="image.jpg", media_type="image/jpeg")
+        try:
+            media.write(b"x" * 512)
+            assert not cast(Any, media.file)._rolled
+            assert media_memory_budget.used == initial_memory
+        finally:
+            media.close()
+        assert media_memory_budget.used == initial_memory
+
+    async def test_middle_tier_stays_in_memory_with_budget(self) -> None:
+        expected = 3 * 1024 * 1024
+        initial_memory = media_memory_budget.used
+        media = await MediaFile.create(
+            filename="image.jpg",
+            media_type="image/jpeg",
+            expected_size=expected,
+        )
+        try:
+            media.write(b"x" * (SPOOL_MEMORY_LIMIT + 1))
+            # 1 MiB 以上仍留在内存，代价是占用一笔内存额度。
+            assert not cast(Any, media.file)._rolled
+            assert media_memory_budget.used == initial_memory + expected
+        finally:
+            media.close()
+        assert media_memory_budget.used == initial_memory
+
+    async def test_large_expected_size_spools_to_disk_immediately(self) -> None:
+        initial_memory = media_memory_budget.used
+        media = await MediaFile.create(
+            filename="video.mp4",
+            media_type="video/mp4",
+            expected_size=MEDIA_MEMORY_TIER_LIMIT + 1,
+        )
+        try:
+            # max_size=0 在 SpooledTemporaryFile 里表示永不 rollover，因此大文件
+            # 必须在创建时显式落盘，不能依赖阈值触发。
+            assert cast(Any, media.file)._rolled
+            assert media_memory_budget.used == initial_memory
+        finally:
+            media.close()
+        assert media_memory_budget.used == initial_memory
+
+    async def test_middle_tier_degrades_to_disk_when_budget_exhausted(self) -> None:
+        expected = 3 * 1024 * 1024
+        initial_memory = media_memory_budget.used
+        with patch("src.media.media_memory_budget", MemoryBudget(expected)):
+            hog = await MediaFile.create(filename="a.jpg", expected_size=expected)
+            try:
+                degraded = await MediaFile.create(filename="b.jpg", expected_size=expected)
+                try:
+                    # 额度用尽时降级落盘，而不是报错或等待。
+                    assert cast(Any, degraded.file)._rolled
+                    assert not cast(Any, hog.file)._rolled
+                finally:
+                    degraded.close()
+            finally:
+                hog.close()
+        assert media_memory_budget.used == initial_memory
+
+    async def test_understated_expected_size_rolls_over_and_releases(self) -> None:
+        initial_memory = media_memory_budget.used
+        declared = 2 * 1024 * 1024
+        media = await MediaFile.create(
+            filename="image.jpg",
+            media_type="image/jpeg",
+            expected_size=declared,
+        )
+        try:
+            # 额度按声明值收取，因此驻留内存的上限也是声明值本身，写满仍在内存。
+            media.write(b"x" * declared)
+            assert not cast(Any, media.file)._rolled
+            assert media_memory_budget.used == initial_memory + declared
+            # 声明值偏小时实际写入会突破额度，此时必须落盘并归还额度。
+            media.write(b"x")
+            assert cast(Any, media.file)._rolled
+            assert media.size == declared + 1
+            assert media_memory_budget.used == initial_memory
+        finally:
+            media.close()
+        assert media_memory_budget.used == initial_memory
+
+    async def test_transcode_output_leaves_memory_tier(self) -> None:
+        initial_memory = media_memory_budget.used
+        media = await MediaFile.create(
+            filename="voice.silk",
+            media_type="audio/silk",
+            expected_size=3 * 1024 * 1024,
+        )
+        try:
+            media.write(b"original")
+            assert media_memory_budget.used > initial_memory
+            with TemporaryDirectory() as directory:
+                output_path = Path(directory) / "converted.ogg"
+                output_path.write_bytes(b"converted-payload")
+                await asyncio.to_thread(replace_media_content, media, output_path)
+            # 转码产物大小与声明值无关，一律退出内存档。
+            assert cast(Any, media.file)._rolled
+            assert media_memory_budget.used == initial_memory
+            assert media.size == len(b"converted-payload")
+            media.rewind()
+            assert media.file.read() == b"converted-payload"
+        finally:
+            media.close()
+        assert media_memory_budget.used == initial_memory
+
+    async def test_fileno_leaves_memory_tier(self) -> None:
+        initial_memory = media_memory_budget.used
+        media = await MediaFile.create(
+            filename="voice.silk",
+            media_type="audio/silk",
+            expected_size=3 * 1024 * 1024,
+        )
+        try:
+            media.write(b"payload")
+            assert media_memory_budget.used > initial_memory
+            # 子进程需要真实 fd，取 fd 必然落盘，所以额度要在此归还。
+            assert media.fileno() > 0
+            assert cast(Any, media.file)._rolled
+            assert media_memory_budget.used == initial_memory
+        finally:
+            media.close()
+        assert media_memory_budget.used == initial_memory
+
+    async def test_memory_budget_never_blocks(self) -> None:
+        budget = MemoryBudget(10)
+        assert budget.try_acquire(10) is True
+        # 语义是“拿不到就落盘”，因此额度不足时立即返回 False，不等待。
+        assert budget.try_acquire(1) is False
+        assert budget.used == 10
+        budget.release(10)
+        assert budget.used == 0
 
     async def test_input_file_keeps_handle_when_requested(self) -> None:
         media = await MediaFile.create(filename="image.jpg", media_type="image/jpeg")

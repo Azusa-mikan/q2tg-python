@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
@@ -14,16 +15,23 @@ from typing import Any
 
 from src.paths import ensure_temp_dir
 
-# 转码产物大小上限，与 Telegram Bot API 通过 getFile 下载的平台硬上限一致。
-MEDIA_SIZE_LIMIT = 20_000_000
-# 供错误文案展示的上限，随 MEDIA_SIZE_LIMIT 自动跟随，避免阈值与文案分别维护。
-MEDIA_SIZE_LIMIT_TEXT = f"{MEDIA_SIZE_LIMIT // 1_000_000} MB"
+# Telegram Bot API 的云端 getFile 下载上限与媒体上传上限不同，必须分别维护。
+TELEGRAM_DOWNLOAD_LIMIT = 20_000_000
+TELEGRAM_DOWNLOAD_LIMIT_TEXT = f"{TELEGRAM_DOWNLOAD_LIMIT // 1_000_000} MB"
+TELEGRAM_UPLOAD_LIMIT = 50_000_000
+TELEGRAM_UPLOAD_LIMIT_TEXT = f"{TELEGRAM_UPLOAD_LIMIT // 1_000_000} MB"
 # 所有 ffmpeg 调用共用的基础参数：禁用交互、隐藏 banner、只输出错误、覆盖输出。
 FFMPEG_BASE_ARGS = ("ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y")
 # 子进程 stderr 解码后保留的末尾字节数，避免超长日志淹没错误信息。
 PROCESS_ERROR_TAIL = 500
 
 SPOOL_MEMORY_LIMIT = 1 * 1024 * 1024
+# 1 MiB 以内的媒体无条件留在内存；1 MiB 到 MEDIA_MEMORY_TIER_LIMIT 之间的媒体
+# 需要先取得内存额度才留在内存，超过则直接落盘。低内存 VPS 上单纯放大
+# SPOOL_MEMORY_LIMIT 会让最坏内存占用等于 MEDIA_RESOURCE_LIMIT 乘以该阈值，
+# 因此中间档必须配额化。
+MEDIA_MEMORY_TIER_LIMIT = 5 * 1024 * 1024
+MEDIA_MEMORY_BUDGET = 64 * 1024 * 1024
 # 落盘后的 SpooledTemporaryFile 会持续占用一个文件描述符。这里限制的不只是
 # Python 对象数量，也是在给系统的 open files 上限留出余量。
 MEDIA_RESOURCE_LIMIT = 256
@@ -72,10 +80,18 @@ async def communicate_media_process(
 
 
 def replace_media_content(media: MediaFile, output_path: Path) -> None:
-    """用临时输出文件分块覆盖 MediaFile。"""
+    """用临时输出文件分块覆盖 MediaFile。
+
+    转码产物的大小与申请内存额度时的声明值无关，一律不参与内存档：退出内存档
+    归还额度并落盘，再覆盖内容，避免额度计数随转码结果漂移。
+
+    清空要放在退出内存档之前：rollover() 会把当前缓冲区完整拷进磁盘文件，而旧
+    内容马上就要被覆盖，先 truncate 可以省掉这次无用拷贝。
+    """
     media.file.seek(0)
     media.file.truncate()
     media.size = 0
+    media.leave_memory_tier()
     with output_path.open("rb") as converted:
         while chunk := converted.read(STREAM_CHUNK_SIZE):
             media.write(chunk)
@@ -184,15 +200,93 @@ class ItemBudget:
                 waiter.set_result(None)
 
 
+class MemoryBudget:
+    """限制中间档媒体驻留内存的总字节数。
+
+    与 ByteBudget 不同，这里的语义是“拿不到额度就落盘”，调用方永不等待，
+    因此不需要 Condition，也不会与 ByteBudget、ItemBudget 叠加出新的等待环。
+
+    但 release() 会经 asyncio.to_thread 在转码 worker 线程被调用
+    （replace_media_content 走 sticker/video 的 to_thread 路径），而
+    try_acquire() 在事件循环线程执行，两者对 self.used 构成真正的跨线程读改
+    写。self.used += size / -= size 会编译成 LOAD/运算/STORE 多条字节码，GIL
+    在字节码之间切换线程即可丢失更新，因此这里用 threading.Lock 保护，而不是
+    依赖 GIL 的原子性假设。锁临界区只有整数加减，无竞争获取是纳秒级开销。
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.used = 0
+        self._lock = threading.Lock()
+
+    def try_acquire(self, size: int) -> bool:
+        with self._lock:
+            if self.used + size > self.limit:
+                return False
+            self.used += size
+            return True
+
+    def release(self, size: int) -> None:
+        with self._lock:
+            self.used -= size
+            if self.used < 0:
+                raise RuntimeError("媒体内存额度计数错误")
+
+
 media_item_budget = ItemBudget(MEDIA_RESOURCE_LIMIT)
 media_queue_budget = ByteBudget(MEDIA_QUEUE_MAX_BYTES)
+media_memory_budget = MemoryBudget(MEDIA_MEMORY_BUDGET)
+
+
+def _acquire_memory_tier(expected_size: int | None) -> int:
+    """按声明大小决定内存驻留额度，返回实际占用的字节数。
+
+    声明大小未知时返回 0，调用方沿用 SPOOL_MEMORY_LIMIT 老路径：此时既不预留
+    额度，也不改变行为，避免把没有 Content-Length 的小文件反而逼去落盘。
+    """
+    if expected_size is None or expected_size <= SPOOL_MEMORY_LIMIT:
+        return 0
+    if expected_size > MEDIA_MEMORY_TIER_LIMIT:
+        return 0
+    return expected_size if media_memory_budget.try_acquire(expected_size) else 0
+
+
+def _create_spool(
+    expected_size: int | None,
+    memory_reserved: int,
+) -> SpooledTemporaryFile[bytes]:
+    """按分档结果创建 spool，必要时立即落盘。
+
+    注意 max_size=0 在 SpooledTemporaryFile 里表示“永不 rollover”而不是“立即
+    落盘”：它的 _check 写作 ``if max_size and file.tell() > max_size``，0 是
+    假值。因此声明大小已经超出免费档又没拿到额度时，必须显式调用 rollover()，
+    省掉先在内存里堆满再触发 rollover 的那一次多余拷贝。
+
+    取得额度时 max_size 必须等于收取的额度本身，而不是 MEDIA_MEMORY_TIER_LIMIT：
+    额度是按声明大小收的，若允许驻留到档位上限，声明 1 MiB 的文件就能实际占用
+    5 MiB 内存，整个额度池会被放大到设计值的数倍。
+    """
+    file = SpooledTemporaryFile(
+        max_size=memory_reserved if memory_reserved else SPOOL_MEMORY_LIMIT,
+        mode="w+b",
+        dir=str(ensure_temp_dir()),
+    )
+    if not memory_reserved and expected_size is not None and expected_size > SPOOL_MEMORY_LIMIT:
+        try:
+            file.rollover()
+        except BaseException:
+            file.close()
+            raise
+    return file
 
 
 class MediaFile:
     """一个可在内存与临时磁盘之间自动切换的媒体文件。
 
-    文件不超过 SPOOL_MEMORY_LIMIT 时由 SpooledTemporaryFile 保存在内存；超过
+    默认不超过 SPOOL_MEMORY_LIMIT 时由 SpooledTemporaryFile 保存在内存；超过
     后自动 rollover 到系统临时目录。对象关闭时，底层临时文件会自动删除。
+    创建时若声明了 expected_size，则按 _acquire_memory_tier 的分档结果决定是否
+    用 media_memory_budget 的额度把中间档文件也留在内存。
 
     MediaFile 的所有权必须明确：创建者负责关闭；进入 TelegramMessage 后由任务负责；
     成功加入 MediaCache 后改由媒体缓存负责。读取租约用于保证 HTTP 响应尚未发送完时，
@@ -206,6 +300,7 @@ class MediaFile:
         filename: str,
         media_type: str,
         owns_item_slot: bool,
+        memory_reserved: int = 0,
     ) -> None:
         self.file = file
         self.filename = filename
@@ -216,6 +311,7 @@ class MediaFile:
         self._close_pending = False
         self._leases = 0
         self._owns_item_slot = owns_item_slot
+        self._memory_reserved = memory_reserved
         self._close_callbacks: list[Callable[[], None]] = []
 
     @classmethod
@@ -224,16 +320,16 @@ class MediaFile:
         *,
         filename: str = "image",
         media_type: str = "application/octet-stream",
+        expected_size: int | None = None,
     ) -> MediaFile:
         # 普通创建路径自行申请一个全局文件名额。
         await media_item_budget.acquire()
+        memory_reserved = _acquire_memory_tier(expected_size)
         try:
-            file = SpooledTemporaryFile(
-                max_size=SPOOL_MEMORY_LIMIT,
-                mode="w+b",
-                dir=str(ensure_temp_dir()),
-            )
+            file = _create_spool(expected_size, memory_reserved)
         except BaseException:
+            if memory_reserved:
+                media_memory_budget.release(memory_reserved)
             media_item_budget.release()
             raise
         return cls(
@@ -241,6 +337,7 @@ class MediaFile:
             filename=filename,
             media_type=media_type,
             owns_item_slot=True,
+            memory_reserved=memory_reserved,
         )
 
     @classmethod
@@ -249,23 +346,60 @@ class MediaFile:
         *,
         filename: str = "image",
         media_type: str = "application/octet-stream",
+        expected_size: int | None = None,
     ) -> MediaFile:
-        # 调用方已批量取得 ItemBudget；这里不能再次 acquire。
+        # 调用方已批量取得 ItemBudget；这里不能再次 acquire。内存额度是同步的
+        # try_acquire，拿不到就落盘，所以同步方法也能参与分档。
+        memory_reserved = _acquire_memory_tier(expected_size)
+        try:
+            file = _create_spool(expected_size, memory_reserved)
+        except BaseException:
+            if memory_reserved:
+                media_memory_budget.release(memory_reserved)
+            raise
         return cls(
-            SpooledTemporaryFile(
-                max_size=SPOOL_MEMORY_LIMIT,
-                mode="w+b",
-                dir=str(ensure_temp_dir()),
-            ),
+            file,
             filename=filename,
             media_type=media_type,
             owns_item_slot=True,
+            memory_reserved=memory_reserved,
         )
+
+    def leave_memory_tier(self) -> None:
+        """让文件退出内存档：确保已落盘并归还额度。
+
+        转码产物大小与申请额度时的声明值无关，取 fileno() 也会强制 spool 落盘，
+        这些路径都必须先归还额度，否则计数会一直挂在已经落盘的文件上。
+        """
+        if not self._memory_reserved:
+            return
+        reserved = self._memory_reserved
+        # 先清零再归还，保证异常或重入时不会重复归还同一笔额度。
+        self._memory_reserved = 0
+        if not self._closed:
+            self.file.rollover()
+        media_memory_budget.release(reserved)
+
+    def fileno(self) -> int:
+        """返回底层文件描述符。
+
+        SpooledTemporaryFile.fileno() 会强制 rollover，因此这里必须先退出内存
+        档。子进程需要真实 fd 的调用方都应该走这个方法，而不是 file.fileno()。
+        """
+        if self._closed:
+            raise ValueError("媒体文件已关闭")
+        self.leave_memory_tier()
+        return self.file.fileno()
 
     def write(self, chunk: bytes) -> None:
         if self._closed:
             raise ValueError("媒体文件已关闭")
         self.file.write(chunk)
+        # 声明大小可能偏小。额度按声明值收取，spool 的 max_size 也等于该额度，
+        # 因此写入超过额度时 spool 已经自动 rollover，这里同步归还额度，避免
+        # 额度长期挂在已落盘的文件上。
+        if self._memory_reserved and self.size + len(chunk) > self._memory_reserved:
+            self.leave_memory_tier()
         # SpooledTemporaryFile 没有直接暴露业务需要的稳定长度属性，所以写入时
         # 自己累计；下载上限、队列预算和 Content-Length 都使用这个值。
         self.size += len(chunk)
@@ -304,6 +438,12 @@ class MediaFile:
         # 只有没有活跃读取租约时才会进入这里。关闭文件会删除已落盘的临时文件。
         self._closed = True
         self.file.close()
+        # 额度必须在文件真正关闭时归还，而不是 close() 被调用时：此前可能仍有
+        # 活跃 HTTP 响应持有该文件，内存也仍未释放。
+        if self._memory_reserved:
+            reserved = self._memory_reserved
+            self._memory_reserved = 0
+            media_memory_budget.release(reserved)
         for callback in self._close_callbacks:
             callback()
         self._close_callbacks.clear()

@@ -7,7 +7,7 @@ import time
 from src.log import baselog
 from src.media import (
     FFMPEG_BASE_ARGS,
-    MEDIA_SIZE_LIMIT_TEXT,
+    TELEGRAM_DOWNLOAD_LIMIT_TEXT,
     MediaFile,
     communicate_media_process,
     decode_process_error,
@@ -36,7 +36,7 @@ async def normalize_video_for_onebot(media: MediaFile, *, size_limit: int) -> No
 
     started_at = time.monotonic()
     async with transcode_target(".mp4") as output_path:
-        input_fd = media.file.fileno()
+        input_fd = media.fileno()
         media.rewind()
         process = await start_media_process(
             *FFMPEG_BASE_ARGS,
@@ -72,7 +72,9 @@ async def normalize_video_for_onebot(media: MediaFile, *, size_limit: int) -> No
         if process.returncode != 0:
             raise ValueError(f"Telegram 视频转码失败: {decode_process_error(stderr)}")
         if output_path.stat().st_size > size_limit:
-            raise ValueError(f"Telegram 视频转码后超过 {MEDIA_SIZE_LIMIT_TEXT} 上限")
+            raise ValueError(
+                f"Telegram 视频转码后超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT} 上限"
+            )
 
         await asyncio.to_thread(
             finalize_media,
@@ -87,7 +89,7 @@ async def normalize_video_for_onebot(media: MediaFile, *, size_limit: int) -> No
 
 
 async def _probe_codecs(media: MediaFile) -> tuple[str | None, tuple[str, ...]]:
-    input_fd = media.file.fileno()
+    input_fd = media.fileno()
     media.rewind()
     process = await start_media_process(
         "ffprobe",

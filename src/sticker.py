@@ -12,8 +12,8 @@ from PIL import Image, UnidentifiedImageError
 from src.log import baselog
 from src.media import (
     FFMPEG_BASE_ARGS,
-    MEDIA_SIZE_LIMIT_TEXT,
     STREAM_CHUNK_SIZE,
+    TELEGRAM_DOWNLOAD_LIMIT_TEXT,
     MediaFile,
     communicate_media_process,
     decode_process_error,
@@ -42,7 +42,9 @@ async def static_sticker_to_png(media: MediaFile, *, size_limit: int) -> None:
         except (OSError, UnidentifiedImageError):
             raise ValueError("Telegram 静态贴纸转换失败") from None
         if output_path.stat().st_size > size_limit:
-            raise ValueError(f"Telegram 贴纸转换后超过 {MEDIA_SIZE_LIMIT_TEXT} 上限")
+            raise ValueError(
+                f"Telegram 贴纸转换后超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT} 上限"
+            )
         await asyncio.to_thread(
             finalize_media,
             media,
@@ -59,7 +61,7 @@ async def video_sticker_to_gif(media: MediaFile, *, size_limit: int) -> None:
     """使用 ffmpeg 将 WebM/VP9 视频贴纸转换为循环透明 GIF。"""
     started_at = time.monotonic()
     async with transcode_target(".gif") as output_path:
-        input_fd = media.file.fileno()
+        input_fd = media.fileno()
         media.rewind()
         process = await start_media_process(
             *FFMPEG_BASE_ARGS,
@@ -90,7 +92,9 @@ async def video_sticker_to_gif(media: MediaFile, *, size_limit: int) -> None:
         if process.returncode != 0:
             raise ValueError(f"Telegram 视频贴纸转换失败: {decode_process_error(stderr)}")
         if output_path.stat().st_size > size_limit:
-            raise ValueError(f"Telegram 贴纸转换后超过 {MEDIA_SIZE_LIMIT_TEXT} 上限")
+            raise ValueError(
+                f"Telegram 贴纸转换后超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT} 上限"
+            )
         await asyncio.to_thread(
             finalize_media,
             media,

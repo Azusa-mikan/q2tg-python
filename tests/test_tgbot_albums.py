@@ -1,14 +1,19 @@
 import asyncio
 from functools import partial
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 from telegram import Message
 
-from src.media import media_item_budget, media_queue_budget
+from src.media import (
+    MEDIA_MEMORY_TIER_LIMIT,
+    media_item_budget,
+    media_memory_budget,
+    media_queue_budget,
+)
 from src.messages import TelegramMessage
 from src.processing import ProcessingTask
 from src.tgbot.handlers import TELEGRAM_DOWNLOAD_LIMIT, TELEGRAM_VIDEO_LIMIT, TGhandlers
@@ -313,3 +318,118 @@ class TestTelegramAlbum:
             await handler.download_client.aclose()
 
         assert size < TELEGRAM_DOWNLOAD_LIMIT
+
+    async def test_middle_tier_file_size_keeps_download_in_memory(self) -> None:
+        # get_file 的 file_size 必须作为 expected_size 传给分档，否则入站媒体
+        # 永远只能走 1 MiB 免费档，内存档对 Telegram -> OneBot 方向就没有作用。
+        initial_items = media_item_budget.used
+        initial_memory = media_memory_budget.used
+        size = 3 * 1024 * 1024
+        photo = SimpleNamespace(
+            file_size=size,
+            get_file=AsyncMock(
+                return_value=SimpleNamespace(
+                    file_size=size,
+                    file_path="https://example.test/image",
+                )
+            ),
+        )
+        message = cast(
+            Message,
+            SimpleNamespace(
+                message_id=6,
+                chat_id=-456,
+                from_user=SimpleNamespace(id=7, full_name="Telegram User"),
+                video=None,
+                photo=(photo,),
+                document=None,
+                caption=None,
+                reply_to_message=None,
+                get_bot=lambda: SimpleNamespace(),
+            ),
+        )
+        handler = TGhandlers()
+        handler.download_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, content=b"image", request=request)
+            )
+        )
+        try:
+            with (
+                patch(
+                    "src.tgbot.handlers.sql.get_tg_forward_enabled",
+                    new_callable=AsyncMock,
+                    return_value=True,
+                ),
+                patch("src.tgbot.handlers.message_bus.put", new_callable=AsyncMock) as put,
+            ):
+                await handler._enqueue_media([message])
+            assert put.await_args is not None
+            task = put.await_args.args[0]
+            content = task.send.args[0].media[0].content
+            assert media_memory_budget.used == initial_memory + size
+            assert not cast(Any, content.file)._rolled
+            assert task.finalize is not None
+            await task.finalize()
+        finally:
+            await handler.download_client.aclose()
+
+        assert media_memory_budget.used == initial_memory
+        assert media_item_budget.used == initial_items
+
+    async def test_large_file_size_spools_download_to_disk(self) -> None:
+        initial_items = media_item_budget.used
+        initial_memory = media_memory_budget.used
+        size = MEDIA_MEMORY_TIER_LIMIT + 1
+        photo = SimpleNamespace(
+            file_size=size,
+            get_file=AsyncMock(
+                return_value=SimpleNamespace(
+                    file_size=size,
+                    file_path="https://example.test/image",
+                )
+            ),
+        )
+        message = cast(
+            Message,
+            SimpleNamespace(
+                message_id=7,
+                chat_id=-456,
+                from_user=SimpleNamespace(id=7, full_name="Telegram User"),
+                video=None,
+                photo=(photo,),
+                document=None,
+                caption=None,
+                reply_to_message=None,
+                get_bot=lambda: SimpleNamespace(),
+            ),
+        )
+        handler = TGhandlers()
+        handler.download_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, content=b"image", request=request)
+            )
+        )
+        try:
+            with (
+                patch(
+                    "src.tgbot.handlers.sql.get_tg_forward_enabled",
+                    new_callable=AsyncMock,
+                    return_value=True,
+                ),
+                patch("src.tgbot.handlers.message_bus.put", new_callable=AsyncMock) as put,
+            ):
+                await handler._enqueue_media([message])
+            assert put.await_args is not None
+            task = put.await_args.args[0]
+            content = task.send.args[0].media[0].content
+            # 声明大小超过中间档上限，创建时就落盘且不占额度。
+            assert cast(Any, content.file)._rolled
+            assert media_memory_budget.used == initial_memory
+            assert task.finalize is not None
+            await task.finalize()
+        finally:
+            await handler.download_client.aclose()
+
+        assert size < TELEGRAM_DOWNLOAD_LIMIT
+        assert media_item_budget.used == initial_items
