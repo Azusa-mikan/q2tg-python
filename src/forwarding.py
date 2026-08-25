@@ -417,6 +417,8 @@ async def forward_onebot_to_telegram(
     if group_id is None:
         baselog.warning("OneBot 群未配置转发目标: %s", msg.group_id)
         return
+    if not await sql.get_tg_forward_enabled(group_id):
+        return
     msg.tg_chat_id = group_id
 
     normalized_message = normalize_onebot_face_message(msg.message)
@@ -834,6 +836,8 @@ async def recall_onebot_message_from_telegram(
             return
         tg_chat_id = mapping.tg_chat_id
         tg_message_ids = mapping.tg_message_ids
+    if not await sql.get_tg_forward_enabled(tg_chat_id):
+        return
     for index in range(0, len(tg_message_ids), 100):
         await bot.delete_messages(
             chat_id=tg_chat_id,
@@ -853,6 +857,8 @@ async def forward_onebot_essence_to_telegram(
             event.group_id,
             event.message_id,
         )
+        return
+    if not await sql.get_tg_forward_enabled(mapping.tg_chat_id):
         return
     for message_id in mapping.tg_message_ids:
         if event.added:
@@ -917,6 +923,8 @@ async def forward_onebot_group_ban_to_telegram(
     if tg_chat_id is None:
         baselog.warning("OneBot 群事件未配置转发目标: %s", event.group_id)
         return
+    if not await sql.get_tg_forward_enabled(tg_chat_id):
+        return
     show_id = bool(await sql.get_id_show_enabled(tg_chat_id))
     user_name, operator_name = await asyncio.gather(
         _onebot_member_name(gateway, event.group_id, event.user_id),
@@ -966,6 +974,8 @@ async def forward_onebot_group_member_to_telegram(
     if tg_chat_id is None:
         baselog.warning("OneBot 群事件未配置转发目标: %s", event.group_id)
         return
+    if not await sql.get_tg_forward_enabled(tg_chat_id):
+        return
     show_id = bool(await sql.get_id_show_enabled(tg_chat_id))
     name = await _onebot_member_name(
         gateway,
@@ -1009,6 +1019,8 @@ async def forward_onebot_poke_to_telegram(
     tg_chat_id = await sql.get_tg_group(event.group_id)
     if tg_chat_id is None:
         baselog.warning("OneBot 群事件未配置转发目标: %s", event.group_id)
+        return
+    if not await sql.get_tg_forward_enabled(tg_chat_id):
         return
     show_id = bool(await sql.get_id_show_enabled(tg_chat_id))
     if event.user_id == event.target_id:
@@ -1452,6 +1464,8 @@ async def forward_telegram_pin_to_onebot(
     gateway: QGateway,
 ) -> None:
     """把 Telegram 置顶应用到映射中的全部 OneBot 消息。"""
+    if not await sql.get_tg_forward_enabled(tg_chat_id):
+        return
     mapping = await _get_q_message(tg_chat_id, tg_message_id)
     if mapping is None:
         baselog.warning(

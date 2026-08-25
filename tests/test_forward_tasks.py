@@ -67,6 +67,7 @@ class TestForwardTasks:
         database = SimpleNamespace(
             get_tg_message=AsyncMock(return_value=None),
             get_tg_group=AsyncMock(return_value=-456),
+            get_tg_forward_enabled=AsyncMock(return_value=True),
             get_id_show_enabled=AsyncMock(return_value=False),
             set_message_mapping=AsyncMock(side_effect=RuntimeError("database unavailable")),
         )
@@ -219,6 +220,7 @@ class TestForwardTasks:
         database = SimpleNamespace(
             get_tg_message=AsyncMock(return_value=None),
             get_tg_group=AsyncMock(return_value=-456),
+            get_tg_forward_enabled=AsyncMock(return_value=True),
             get_id_show_enabled=AsyncMock(return_value=False),
             set_message_mapping=AsyncMock(side_effect=RuntimeError("database unavailable")),
         )
@@ -247,6 +249,31 @@ class TestForwardTasks:
                 )
 
         bot.send_message.assert_awaited_once()
+
+    async def test_onebot_forward_is_dropped_when_forwarding_is_disabled(self) -> None:
+        bot = SimpleNamespace(send_message=AsyncMock())
+        database = SimpleNamespace(
+            get_tg_message=AsyncMock(return_value=None),
+            get_tg_group=AsyncMock(return_value=-456),
+            get_tg_forward_enabled=AsyncMock(return_value=False),
+        )
+        message = OneBotMessage(
+            message_id=101,
+            group_id=123,
+            user_id=456,
+            sender_name="Example User",
+            message=[{"type": "text", "data": {"text": "message"}}],
+        )
+
+        async with httpx.AsyncClient() as client:
+            with patch("src.forwarding.sql", database):
+                await forward_onebot_to_telegram(
+                    message,
+                    cast(ExtBot[None], bot),
+                    client,
+                )
+
+        bot.send_message.assert_not_awaited()
 
     async def test_telegram_target_exhaustion_only_notifies_onebot(self) -> None:
         bus = MessageBus()

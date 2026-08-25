@@ -196,6 +196,11 @@ class TestMentions:
                 ),
                 patch("src.forwarding.sql.get_tg_group", new_callable=AsyncMock, return_value=-456),
                 patch(
+                    "src.forwarding.sql.get_tg_forward_enabled",
+                    new_callable=AsyncMock,
+                    return_value=True,
+                ),
+                patch(
                     "src.forwarding.sql.get_id_show_enabled",
                     new_callable=AsyncMock,
                     return_value=False,

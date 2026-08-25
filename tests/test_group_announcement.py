@@ -86,6 +86,7 @@ class TestGroupAnnouncement:
         database = SimpleNamespace(
             get_tg_message=AsyncMock(return_value=None),
             get_tg_group=AsyncMock(return_value=-100_123),
+            get_tg_forward_enabled=AsyncMock(return_value=True),
             get_id_show_enabled=AsyncMock(return_value=False),
             set_message_mapping=AsyncMock(),
         )
@@ -167,6 +168,7 @@ class TestGroupAnnouncement:
         database = SimpleNamespace(
             get_tg_message=AsyncMock(return_value=None),
             get_tg_group=AsyncMock(return_value=-100_123),
+            get_tg_forward_enabled=AsyncMock(return_value=True),
             get_id_show_enabled=AsyncMock(return_value=False),
             set_message_mapping=AsyncMock(),
         )
@@ -204,6 +206,7 @@ class TestGroupAnnouncement:
         database = SimpleNamespace(
             get_tg_message=AsyncMock(return_value=None),
             get_tg_group=AsyncMock(return_value=-100_123),
+            get_tg_forward_enabled=AsyncMock(return_value=True),
             get_id_show_enabled=AsyncMock(return_value=True),
             set_message_mapping=AsyncMock(),
         )
@@ -246,6 +249,7 @@ class TestGroupAnnouncement:
         database = SimpleNamespace(
             get_tg_message=AsyncMock(return_value=None),
             get_tg_group=AsyncMock(return_value=-100_123),
+            get_tg_forward_enabled=AsyncMock(return_value=True),
             get_id_show_enabled=AsyncMock(return_value=False),
             set_message_mapping=AsyncMock(),
         )

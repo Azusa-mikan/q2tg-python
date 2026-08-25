@@ -123,7 +123,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     CommandSpec("start", "查看 Bot 运行状态", "start"),
     CommandSpec("bind", "绑定当前 Telegram 群与 OneBot 群", "bind"),
     CommandSpec("unbind", "解除当前群的 OneBot 群绑定", "unbind"),
-    CommandSpec("forward", "查看或设置 Telegram 到 OneBot 转发", "forward"),
+    CommandSpec("forward", "查看或设置双向消息转发", "forward"),
     CommandSpec("bot_forward", "查看或设置其他 Bot 消息转发", "bot_forward"),
     CommandSpec("id_show", "查看或设置 OneBot 用户 ID 显示", "id_show"),
     CommandSpec("at", "选择需要 @ 的 OneBot 群成员", "at"),
@@ -521,7 +521,7 @@ class TGhandlers:
             )
 
     async def forward(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """查询或设置当前 Telegram 群到 OneBot 的转发开关。"""
+        """查询或设置当前绑定的双向消息转发开关。"""
         context_group = await self._require_group_context(update)
         if context_group is None:
             return
@@ -543,11 +543,11 @@ class TGhandlers:
             enqueue_bridge_notice(
                 partial(
                     msg.reply_text,
-                    f"当前 Telegram → OneBot 转发已{'开启' if enabled else '关闭'}",
+                    f"当前双向消息转发已{'开启' if enabled else '关闭'}",
                 ),
                 q_gateway,
                 q_group_id=q_group_id,
-                text=f"当前 Telegram → OneBot 转发已{'开启' if enabled else '关闭'}",
+                text=f"当前双向消息转发已{'开启' if enabled else '关闭'}",
             )
             return
 
@@ -562,11 +562,11 @@ class TGhandlers:
         enqueue_bridge_notice(
             partial(
                 msg.reply_text,
-                f"Telegram → OneBot 转发已{'开启' if enabled else '关闭'}",
+                f"双向消息转发已{'开启' if enabled else '关闭'}",
             ),
             q_gateway,
             q_group_id=q_group_id,
-            text=f"Telegram → OneBot 转发已{'开启' if enabled else '关闭'}",
+            text=f"双向消息转发已{'开启' if enabled else '关闭'}",
         )
 
     async def id_show(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1102,6 +1102,8 @@ class TGhandlers:
             return
         if msg.from_user is not None and msg.from_user.id == context.bot.id:
             # OneBot 精华同步触发的 Telegram 服务消息不能再次回传。
+            return
+        if not await sql.get_tg_forward_enabled(msg.chat_id):
             return
         await self._put_onebot_task(
             msg,

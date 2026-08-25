@@ -11,7 +11,7 @@ async def await_completion_on_cancel[T](operation: Awaitable[T]) -> T:
     task = asyncio.ensure_future(operation)
     try:
         return await asyncio.shield(task)
-    except asyncio.CancelledError as cancelled:
+    except asyncio.CancelledError:
         while not task.done():
             try:
                 await asyncio.shield(task)
@@ -19,8 +19,10 @@ async def await_completion_on_cancel[T](operation: Awaitable[T]) -> T:
                 continue
         try:
             task.result()
-        except BaseException as error:
-            cancelled.add_note(f"Cleanup operation failed: {error!r}")
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            baselog.exception("关键清理操作失败")
         raise
 
 
@@ -28,15 +30,12 @@ async def await_cancelled(task: asyncio.Task[object], *, log_label: str | None =
     """等待一个已被 cancel 的任务结束并处理其退出结果。
 
     调用方应先对全部任务发出 cancel，再逐个 await，使它们并行收尾。
-    CancelledError 是预期的取消结果，直接吞掉。其它异常表示任务在取消前已经
-    失败：给出 log_label 时记录后继续，使调用方的后续资源关闭不被跳过；未给出
-    log_label 时向上抛出，交由调用方处理。
+    CancelledError 是预期的取消结果，直接吞掉。其它异常只记录并继续，使调用方
+    的后续资源关闭不被跳过；log_label 仅用于区分日志，不改变异常处理策略。
     """
     try:
         await task
     except asyncio.CancelledError:
         pass
     except Exception:
-        if log_label is None:
-            raise
-        baselog.exception("%s", log_label)
+        baselog.exception("%s", log_label or "后台清理任务异常退出")

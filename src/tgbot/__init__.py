@@ -96,12 +96,12 @@ class TGBot:
                 await self.app.start()
                 self._running = True
                 self._started_once = True
-            except BaseException as error:
+            except BaseException:
                 # BaseException 包含任务取消；启动任务被取消时同样必须释放 PTB 资源。
                 try:
                     await self._shutdown()
-                except BaseException as shutdown_error:
-                    error.add_note(f"TGBot cleanup failed: {shutdown_error!r}")
+                except BaseException:
+                    baselog.exception("Telegram Bot 清理失败")
                 raise
 
     async def shutdown(self) -> None:

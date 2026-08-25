@@ -299,7 +299,7 @@ OneBot 11 容器或设备中检查该 URL 的 DNS、端口、防火墙和反向�
 | `/bind <Telegram 聊天 ID> <OneBot 群号>` | 配置的 Bot 管理员 | 在私聊中绑定指定 Telegram 群与 OneBot 群 |
 | `/unbind` | 配置的 Bot 管理员 | 在群聊中解除当前群的绑定 |
 | `/unbind <Telegram 聊天 ID或OneBot 群号>` | 配置的 Bot 管理员 | 在私聊中按任一侧群 ID 解除绑定 |
-| `/forward [on\|off]` | Telegram 群管理员 | 查询或设置 Telegram 到 OneBot 的转发状态 |
+| `/forward [on\|off]` | Telegram 群管理员 | 查询或设置 OneBot 与 Telegram 的双向转发状态 |
 | `/bot_forward [on\|off]` | Telegram 群管理员 | 查询或设置其他 Bot 消息及用户发给其他 Bot 的命令是否转发到 OneBot |
 | `/id_show [on\|off]` | Telegram 群管理员 | 查询或设置 OneBot 用户及 @ 对象的数字 ID 显示 |
 | `/at` | 所有人 | 打开 Inline Mode，选择需要 @ 的 OneBot 群成员 |
@@ -363,7 +363,7 @@ ID 搜索已绑定 OneBot 群的成员；选择成员后会发送真正的 OneBo
 
 ### Telegram 消息无法转发
 
-确认当前 Telegram 群已经通过 `/bind` 绑定，并使用 `/forward` 检查转发开关。同时检查
+确认当前 Telegram 群已经通过 `/bind` 绑定，并使用 `/forward` 检查双向转发开关。同时检查
 Telegram Bot 是否有读取和发送群消息所需的权限。
 
 其他 Bot 消息或用户发给其他 Bot 的命令无法转发时，还应确认已执行 `/bot_forward on`，

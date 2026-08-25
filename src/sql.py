@@ -167,6 +167,7 @@ class Sql:
                 )
 
     async def set_tg_forward_enabled(self, tg_chat_id: int, enabled: bool) -> bool:
+        """设置绑定群的双向自动转发开关。"""
         return await self._set_group_flag(
             tg_chat_id,
             group_mappings.c.tg_forward_enabled,
@@ -174,6 +175,7 @@ class Sql:
         )
 
     async def get_tg_forward_enabled(self, tg_chat_id: int) -> bool | None:
+        """读取绑定群的双向自动转发开关。"""
         return await self._get_group_flag(
             tg_chat_id,
             group_mappings.c.tg_forward_enabled,

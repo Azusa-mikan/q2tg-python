@@ -107,15 +107,15 @@ class TestForwardSwitch:
     async def test_group_admin_can_disable_and_enable_forwarding(self) -> None:
         message, gateway = await self._forward(args=["off"], status=ChatMember.ADMINISTRATOR)
         assert not await self.sql.get_tg_forward_enabled(-456)
-        message.reply_text.assert_awaited_once_with("Telegram → OneBot 转发已关闭")
+        message.reply_text.assert_awaited_once_with("双向消息转发已关闭")
         gateway.send_group_message.assert_awaited_once_with(
             group_id=123,
-            message=[{"type": "text", "data": {"text": "Telegram → OneBot 转发已关闭"}}],
+            message=[{"type": "text", "data": {"text": "双向消息转发已关闭"}}],
         )
 
         message, gateway = await self._forward(args=["on"], status=ChatMember.OWNER)
         assert await self.sql.get_tg_forward_enabled(-456)
-        message.reply_text.assert_awaited_once_with("Telegram → OneBot 转发已开启")
+        message.reply_text.assert_awaited_once_with("双向消息转发已开启")
         gateway.send_group_message.assert_awaited_once()
 
     async def test_regular_member_cannot_change_forwarding(self) -> None:

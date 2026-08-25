@@ -19,6 +19,7 @@ group_mappings = sa.Table(
     metadata,
     sa.Column("q_group_id", sa.BigInteger(), primary_key=True, autoincrement=False),
     sa.Column("tg_chat_id", sa.BigInteger(), nullable=False, unique=True),
+    # 字段名为历史兼容名称，实际控制绑定两侧的双向自动转发。
     sa.Column(
         "tg_forward_enabled",
         sa.Boolean(),

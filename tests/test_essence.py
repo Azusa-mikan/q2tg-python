@@ -162,6 +162,7 @@ class TestEssenceBridge:
 
         with (
             patch("src.tgbot.handlers.message_bus", self.bus),
+            patch("src.tgbot.handlers.sql", self.sql),
             patch("src.tgbot.handlers.q_gateway", gateway),
         ):
             await handler.receive_pinned_message(update, context)
@@ -176,6 +177,31 @@ class TestEssenceBridge:
             self.bus.onebot_event_queue.task_done()
 
         assert gateway.set_essence_message.await_args_list == [call(-1_001), call(-1_002)]
+
+    async def test_disabled_forwarding_drops_onebot_essence_event(self) -> None:
+        await self.sql.set_tg_forward_enabled(-100_123, False)
+        with patch("src.qbot.message_bus", self.bus):
+            await receive_onebot_event(
+                {
+                    "post_type": "notice",
+                    "notice_type": "essence",
+                    "sub_type": "add",
+                    "group_id": 123,
+                    "message_id": -1_001,
+                },
+                self.bot,
+                self.client,
+            )
+
+        task = await self.bus.telegram_event_queue.get()
+        try:
+            assert isinstance(task, SendTask)
+            with patch("src.forwarding.sql", self.sql):
+                await task.send()
+        finally:
+            self.bus.telegram_event_queue.task_done()
+
+        self.pin_chat_message.assert_not_awaited()
 
     async def test_bot_generated_pin_service_message_is_ignored(self) -> None:
         handler = TGhandlers()
