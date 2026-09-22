@@ -67,7 +67,7 @@ TEST_ITEMS: tuple[TestItem, ...] = (
     TestItem("sticker-video-tg-to-q", "在 Telegram 群发送一个视频贴纸。", label_prefix="telegram-to-onebot:", capability="telegram.sticker.video"),
     TestItem("sticker-tgs-tg-to-q", "在 Telegram 群发送一个 TGS 动态贴纸。", label_prefix="telegram-to-onebot:", capability="telegram.sticker.tgs"),
     TestItem("gif-q-to-tg", "在 OneBot 群以图片段发送一个 GIF；Telegram 应收到动画。", label_prefix="onebot-to-telegram:", capability="onebot.image.animation"),
-    TestItem("media-group-tg-to-q", "在 Telegram 群发送一个恰好 10 项、合计不超过 20 MB 的媒体组。", label_prefix="telegram-to-onebot:", capability="telegram.media-group.limit"),
+    TestItem("media-group-tg-to-q", "在 Telegram 群发送一个 2～10 张图片的相册；每张图片应各自作为一条消息转发。", label_prefix="telegram-to-onebot:", capability="telegram.media.image"),
     TestItem("recall-q-to-tg", "先从 OneBot 群发送一条消息，转发后在 OneBot 侧正常撤回。", label_prefix="onebot-recall:"),
     TestItem("undo-tg", "在 Telegram 群回复一条已有映射的消息并使用 /undo。", phase="command.succeeded", label_prefix="telegram-undo"),
     TestItem("member-join-q-to-tg", "触发 OneBot 群成员加入事件。", label_prefix="onebot-group-increase:"),

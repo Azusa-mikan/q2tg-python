@@ -9,6 +9,14 @@ from tempfile import TemporaryDirectory
 
 from PIL import Image, UnidentifiedImageError
 
+try:
+    # rlottie-python 通过 __init__ 重导出，但未声明 __all__，Pyright 会误报私有导入。
+    from rlottie_python import (
+        LottieAnimation,  # pyright: ignore[reportPrivateImportUsage]
+    )
+except (ImportError, OSError):  # pragma: no cover - 原生库缺失时回退到外部转换器
+    LottieAnimation = None
+
 from src.log import baselog
 from src.media import (
     FFMPEG_BASE_ARGS,
@@ -18,6 +26,7 @@ from src.media import (
     communicate_media_process,
     decode_process_error,
     finalize_media,
+    media_input_path,
     run_media_thread,
     start_media_process,
     transcode_target,
@@ -62,34 +71,36 @@ async def video_sticker_to_gif(media: MediaFile, *, size_limit: int) -> None:
     """使用 ffmpeg 将 WebM/VP9 视频贴纸转换为循环透明 GIF。"""
     started_at = time.monotonic()
     async with transcode_target(".gif") as output_path:
-        input_fd = media.fileno()
-        media.rewind()
-        process = await start_media_process(
-            *FFMPEG_BASE_ARGS,
-            "-c:v",
-            "libvpx-vp9",
-            "-i",
-            f"/proc/self/fd/{input_fd}",
-            "-filter_complex",
-            (
-                "[0:v]fps=15,scale=512:512:force_original_aspect_ratio=decrease:"
-                "flags=lanczos,split[s0][s1];"
-                "[s0]palettegen=reserve_transparent=1:stats_mode=diff[p];"
-                "[s1][p]paletteuse=dither=sierra2_4a:alpha_threshold=128"
-            ),
-            "-loop",
-            "0",
-            "-fs",
-            str(size_limit + 1),
-            str(output_path),
-            pass_fds=(input_fd,),
-            missing_error="视频贴纸转发需要安装 ffmpeg",
-        )
-        _, stderr = await communicate_media_process(
-            process,
-            timeout=STICKER_TRANSCODE_TIMEOUT,
-            timeout_error="Telegram 视频贴纸转换超时",
-        )
+        async with media_input_path(media, suffix=".webm") as (
+            input_path,
+            process_kwargs,
+        ):
+            process = await start_media_process(
+                *FFMPEG_BASE_ARGS,
+                "-c:v",
+                "libvpx-vp9",
+                "-i",
+                input_path,
+                "-filter_complex",
+                (
+                    "[0:v]fps=15,scale=512:512:force_original_aspect_ratio=decrease:"
+                    "flags=lanczos,split[s0][s1];"
+                    "[s0]palettegen=reserve_transparent=1:stats_mode=diff[p];"
+                    "[s1][p]paletteuse=dither=sierra2_4a:alpha_threshold=128"
+                ),
+                "-loop",
+                "0",
+                "-fs",
+                str(size_limit + 1),
+                str(output_path),
+                **process_kwargs,
+                missing_error="视频贴纸转发需要安装 ffmpeg",
+            )
+            _, stderr = await communicate_media_process(
+                process,
+                timeout=STICKER_TRANSCODE_TIMEOUT,
+                timeout_error="Telegram 视频贴纸转换超时",
+            )
         if process.returncode != 0:
             raise ValueError(f"Telegram 视频贴纸转换失败: {decode_process_error(stderr)}")
         if output_path.stat().st_size > size_limit:
@@ -109,7 +120,11 @@ async def video_sticker_to_gif(media: MediaFile, *, size_limit: int) -> None:
 
 
 async def tgs_sticker_to_gif(media: MediaFile) -> None:
-    """使用 lottie-converter 将 TGS 转换为循环透明 GIF。"""
+    """将 TGS 动态贴纸转换为循环透明 GIF。
+
+    优先使用随依赖安装的 rlottie，在本地和容器中都不再需要 Docker 或外部
+    转换器；仅在原生依赖缺失时回退到内置脚本或 Docker 镜像。
+    """
     started_at = time.monotonic()
     temp_dir = str(ensure_temp_dir())
     with TemporaryDirectory(dir=temp_dir) as conversion_dir:
@@ -124,7 +139,12 @@ async def tgs_sticker_to_gif(media: MediaFile) -> None:
         finally:
             media.rewind()
 
-        if CONTAINER_MARKER.is_file():
+        if LottieAnimation is not None:
+            try:
+                await run_media_thread(_render_tgs_gif, source_path, output_path)
+            except Exception as error:
+                raise ValueError(f"Telegram TGS 贴纸转换失败: {error}") from error
+        elif CONTAINER_MARKER.is_file():
             await _run_sticker_process(
                 "bash",
                 "/usr/local/bin/lottie_to_gif.sh",
@@ -146,16 +166,15 @@ async def tgs_sticker_to_gif(media: MediaFile) -> None:
                 "docker",
                 "run",
                 "--rm",
-                "--user",
-                f"{os.getuid()}:{os.getgid()}",
+                *_docker_user_arguments(),
                 "--volume",
                 f"{mount}:/source",
                 LOTTIE_CONVERTER_IMAGE,
                 "bash",
                 "/usr/bin/lottie_to_gif.sh",
                 *_lottie_arguments(
-                    Path("/source") / source_path.name,
-                    Path("/source") / output_path.name,
+                    f"/source/{source_path.name}",
+                    f"/source/{output_path.name}",
                 ),
                 missing_error="本地 TGS 贴纸转发需要安装 Docker",
                 failure_prefix="Docker TGS 贴纸转换失败",
@@ -172,7 +191,16 @@ async def tgs_sticker_to_gif(media: MediaFile) -> None:
         baselog.info("TGS 贴纸转码完成，耗时 %.2f 秒", time.monotonic() - started_at)
 
 
-def _lottie_arguments(source_path: Path, output_path: Path) -> tuple[str, ...]:
+def _render_tgs_gif(source_path: Path, output_path: Path) -> None:
+    """用内置 librlottie 把 TGS JSON 渲染为透明 GIF（同步，需在 worker 线程执行）。"""
+    animation_factory = LottieAnimation
+    if animation_factory is None:
+        raise ValueError("rlottie-python 不可用")
+    with animation_factory.from_file(str(source_path)) as animation:
+        animation.save_animation(str(output_path))
+
+
+def _lottie_arguments(source_path: str | Path, output_path: str | Path) -> tuple[str, ...]:
     return (
         "--width",
         "512",
@@ -188,6 +216,13 @@ def _lottie_arguments(source_path: Path, output_path: Path) -> tuple[str, ...]:
         str(output_path),
         str(source_path),
     )
+
+
+def _docker_user_arguments() -> tuple[str, ...]:
+    """在 Unix 上保留宿主用户映射；Windows 没有 getuid/getgid。"""
+    if hasattr(os, "getuid") and hasattr(os, "getgid"):
+        return ("--user", f"{os.getuid()}:{os.getgid()}")
+    return ()
 
 
 def _copy_tgs_json(compressed: gzip.GzipFile, output_path: Path) -> None:

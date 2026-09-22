@@ -272,7 +272,7 @@ class TestVoice:
                 ),
                 patch("src.tgbot.handlers.message_bus.put", new_callable=AsyncMock) as put,
             ):
-                await handler._enqueue_media([message])
+                await handler._enqueue_media(message)
 
             assert put.await_args is not None
             task = put.await_args.args[0]
@@ -317,6 +317,6 @@ class TestVoice:
             ),
             pytest.raises(ValueError, match="媒体超过 20 MB，无法转发"),
         ):
-            await handler._enqueue_media([message])
+            await handler._enqueue_media(message)
 
         source.get_file.assert_not_awaited()

@@ -1,6 +1,5 @@
 """Telegram 命令、文本和媒体 Update 的入口处理器。"""
 
-import asyncio
 import hashlib
 import time
 from collections.abc import Awaitable, Callable
@@ -81,8 +80,6 @@ from src.runtime_stats import get_runtime_info
 from src.sql import sql
 
 TELEGRAM_VIDEO_LIMIT = TELEGRAM_DOWNLOAD_LIMIT
-TELEGRAM_ALBUM_LIMIT = 10
-TELEGRAM_ALBUM_BYTES_LIMIT = 100_000_000
 DOWNLOAD_CHUNK_SIZE = 256 * 1024
 INLINE_AT_TTL = 5 * 60
 INLINE_AT_PAGE_SIZE = 50
@@ -196,6 +193,21 @@ def telegram_media_kind(msg: Message) -> str:
     return "file"
 
 
+def telegram_message_has_spoiler(msg: Message) -> bool:
+    """判断消息或媒体是否带 Telegram 遮罩（spoiler）。"""
+    if getattr(msg, "has_media_spoiler", False):
+        return True
+    spoiler_type = getattr(MessageEntity, "SPOILER", "spoiler")
+    return any(
+        getattr(entity, "type", None) == spoiler_type
+        for entities in (
+            getattr(msg, "entities", None),
+            getattr(msg, "caption_entities", None),
+        )
+        for entity in (entities or ())
+    )
+
+
 class TGhandlers:
     """Telegram 命令、文本和媒体入口集合。
 
@@ -204,12 +216,6 @@ class TGhandlers:
     """
 
     def __init__(self) -> None:
-        # Telegram 相册会拆成多个 Update；以 media_group_id 暂存到同一列表。
-        self._albums: dict[str, list[Message]] = {}
-
-        # 每个相册只创建一个延迟 flush 任务，后续图片只追加到列表。
-        self._album_tasks: dict[str, asyncio.Task[None]] = {}
-
         # 由 SnowLuma WebSocket 会话注入和关闭，handlers 不拥有该客户端的生命周期。
         self.download_client: httpx.AsyncClient | None = None
 
@@ -1038,7 +1044,7 @@ class TGhandlers:
         if self._message_has_media(msg):
             try:
                 await self._enqueue_media_while_connected(
-                    [msg],
+                    msg,
                     context.bot.id,
                     replace_existing=True,
                 )
@@ -1089,6 +1095,8 @@ class TGhandlers:
         if not await sql.get_tg_forward_enabled(msg.chat_id):
             return
         if not await self._can_forward_sender(msg, context.bot.id):
+            return
+        if telegram_message_has_spoiler(msg):
             return
         user_id = msg.from_user.id if msg.from_user is not None else 0
         sender_name = msg.from_user.full_name if msg.from_user is not None else f"Telegram用户 {user_id}"
@@ -1207,59 +1215,28 @@ class TGhandlers:
         )
 
     async def receive_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """处理单个图片、视频、语音或文件，或按 media_group_id 收集媒体组。"""
+        """处理单个图片、视频、语音或文件。
+
+         Telegram 相册的每张图片都是独立 Update，只共享 media_group_id，且没有
+         明确的“相册结束”事件。这里不再聚合，每张图片都作为独立消息逐条转发，
+         避免聚合窗口导致的丢帧。
+        """
         msg = update.effective_message
         if msg is None:
             return
-        if msg.media_group_id is None:
-            try:
-                await self._enqueue_media_while_connected([msg], context.bot.id)
-            except ValueError as error:
-                await msg.reply_text(str(error))
-                emit_runtime_event(
-                    "inbound.rejected",
-                    f"telegram-media:{telegram_media_kind(msg)}",
-                    error=error,
-                )
-            return
-
-        album = self._albums.setdefault(msg.media_group_id, [])
-        album.append(msg)
-        if msg.media_group_id not in self._album_tasks:
-            # PTB Application 创建任务后会跟踪其异常和关闭行为。
-            task = context.application.create_task(
-                self._flush_album(msg.media_group_id),
-                update=update,
-            )
-            self._album_tasks[msg.media_group_id] = task
-
-    async def _flush_album(self, media_group_id: str) -> None:
-        """等待短聚合窗口后，把同一相册作为一条内部消息处理。"""
         try:
-            # Telegram 没有明确的“相册结束”事件，只能通过短暂静默判断收集完成。
-            await asyncio.sleep(0.75)
-            messages = self._albums.pop(media_group_id, [])
-            if messages:
-                try:
-                    await self._enqueue_media_while_connected(
-                        messages,
-                        messages[0].get_bot().id,
-                    )
-                except ValueError as error:
-                    await messages[0].reply_text(str(error))
-                    emit_runtime_event(
-                        "inbound.rejected",
-                        "telegram-media-group",
-                        error=error,
-                    )
-        finally:
-            # 取消可能发生在聚合窗口内，此时还没有 pop 相册消息。
-            self._albums.pop(media_group_id, None)
-            self._album_tasks.pop(media_group_id, None)
+            await self._enqueue_media_while_connected(msg, context.bot.id)
+        except ValueError as error:
+            await msg.reply_text(str(error))
+            emit_runtime_event(
+                "inbound.rejected",
+                f"telegram-media:{telegram_media_kind(msg)}",
+                error=error,
+            )
 
     async def _enqueue_media_while_connected(
         self,
-        messages: list[Message],
+        message: Message,
         bot_id: int | None,
         *,
         replace_existing: bool = False,
@@ -1268,7 +1245,7 @@ class TGhandlers:
             await message_bus.run_while_target_available(
                 SendTarget.ONEBOT,
                 self._enqueue_media(
-                    messages,
+                    message,
                     bot_id,
                     replace_existing=replace_existing,
                 ),
@@ -1278,264 +1255,200 @@ class TGhandlers:
 
     async def _enqueue_media(
         self,
-        messages: list[Message],
+        message: Message,
         bot_id: int | None = None,
         *,
         replace_existing: bool = False,
     ) -> None:
-        """下载一组 Telegram 媒体，取得资源预算后放入消息队列。
+        """下载一条 Telegram 媒体，取得资源预算后放入消息队列。
 
          Telegram 的 Message.photo 是同一张照片的多个尺寸，不是多张照片；这里
-        选择最后一个最大尺寸。video、voice、audio 和 document 分别映射为
-        OneBot 的 video、record、file 和 file。函数成功入队后，MediaFile 所有权
-        交给转发任务；此前的异常或取消路径由本函数清理。
+         选择最后一个最大尺寸。video、voice、audio 和 document 分别映射为
+         OneBot 的 video、record、file 和 file。函数成功入队后，MediaFile 所有权
+         交给转发任务；此前的异常或取消路径由本函数清理。
         """
-        # Update 到达次序不一定稳定，按 message_id 恢复用户发送的相册顺序。
-        messages.sort(key=lambda message: message.message_id)
-        if len(messages) > TELEGRAM_ALBUM_LIMIT:
-            raise ValueError("Telegram 媒体组超过 10 项上限")
-
-        first = messages[0]
-        if not await sql.get_tg_forward_enabled(first.chat_id):
+        if not await sql.get_tg_forward_enabled(message.chat_id):
             return
-        if not await self._can_forward_sender(first, bot_id):
+        if not await self._can_forward_sender(message, bot_id):
             return
-        user_id = first.from_user.id if first.from_user is not None else 0
-        sender_name = first.from_user.full_name if first.from_user is not None else f"Telegram用户 {user_id}"
-        sources = []
-        for message in messages:
-            if (sticker := getattr(message, "sticker", None)) is not None:
-                if sticker.is_animated:
-                    sources.append(
-                        (
-                            "image",
-                            sticker,
-                            TELEGRAM_DOWNLOAD_LIMIT,
-                            "sticker_tgs",
-                        )
-                    )
-                elif sticker.is_video:
-                    sources.append(
-                        (
-                            "image",
-                            sticker,
-                            TELEGRAM_DOWNLOAD_LIMIT,
-                            "sticker_video",
-                        )
-                    )
-                else:
-                    sources.append(
-                        (
-                            "image",
-                            sticker,
-                            TELEGRAM_DOWNLOAD_LIMIT,
-                            "sticker_static",
-                        )
-                    )
-            elif message.video is not None:
-                sources.append(("video", message.video, TELEGRAM_DOWNLOAD_LIMIT, "video"))
-            elif (voice := getattr(message, "voice", None)) is not None:
-                sources.append(("record", voice, TELEGRAM_DOWNLOAD_LIMIT, "none"))
-            elif message.photo:
-                sources.append(("image", message.photo[-1], TELEGRAM_DOWNLOAD_LIMIT, "none"))
-            elif (audio := getattr(message, "audio", None)) is not None:
-                sources.append(("file", audio, TELEGRAM_DOWNLOAD_LIMIT, "none"))
-            elif (document := message.document) is not None:
-                sources.append(("file", document, TELEGRAM_DOWNLOAD_LIMIT, "none"))
+        if telegram_message_has_spoiler(message):
+            return
+        user_id = message.from_user.id if message.from_user is not None else 0
+        sender_name = (
+            message.from_user.full_name
+            if message.from_user is not None
+            else f"Telegram用户 {user_id}"
+        )
 
-        if not sources:
+        source: tuple[str, Any, int, str] | None = None
+        if (sticker := getattr(message, "sticker", None)) is not None:
+            if sticker.is_animated:
+                source = ("image", sticker, TELEGRAM_DOWNLOAD_LIMIT, "sticker_tgs")
+            elif sticker.is_video:
+                source = ("image", sticker, TELEGRAM_DOWNLOAD_LIMIT, "sticker_video")
+            else:
+                source = ("image", sticker, TELEGRAM_DOWNLOAD_LIMIT, "sticker_static")
+        elif message.video is not None:
+            source = ("video", message.video, TELEGRAM_DOWNLOAD_LIMIT, "video")
+        elif (voice := getattr(message, "voice", None)) is not None:
+            source = ("record", voice, TELEGRAM_DOWNLOAD_LIMIT, "none")
+        elif message.photo:
+            source = ("image", message.photo[-1], TELEGRAM_DOWNLOAD_LIMIT, "none")
+        elif (audio := getattr(message, "audio", None)) is not None:
+            source = ("file", audio, TELEGRAM_DOWNLOAD_LIMIT, "none")
+        elif (document := message.document) is not None:
+            source = ("file", document, TELEGRAM_DOWNLOAD_LIMIT, "none")
+
+        if source is None:
             return
 
-        work_id = f"telegram-to-onebot:{first.chat_id}:{tuple(message.message_id for message in messages)}"
-        for kind, _, _, processing in sources:
-            capability = {
-                "sticker_static": "telegram.sticker.static.input",
-                "sticker_video": "telegram.sticker.video.input",
-                "sticker_tgs": "telegram.sticker.tgs.input",
-                "video": "telegram.media.video",
-            }.get(processing, f"telegram.media.{kind}")
-            emit_runtime_event("capability.succeeded", capability, work_id=work_id)
-        if len(sources) == TELEGRAM_ALBUM_LIMIT:
-            emit_runtime_event(
-                "capability.succeeded",
-                "telegram.media-group.limit",
-                work_id=work_id,
-            )
+        kind, telegram_file, size_limit, processing = source
+        work_id = f"telegram-to-onebot:{message.chat_id}:{(message.message_id,)}"
+        capability = {
+            "sticker_static": "telegram.sticker.static.input",
+            "sticker_video": "telegram.sticker.video.input",
+            "sticker_tgs": "telegram.sticker.tgs.input",
+            "video": "telegram.media.video",
+        }.get(processing, f"telegram.media.{kind}")
+        emit_runtime_event("capability.succeeded", capability, work_id=work_id)
 
-        declared_size = sum(source.file_size or limit for _, source, limit, _ in sources)
-        if any(
-            source.file_size is not None and source.file_size > limit
-            for _, source, limit, _ in sources
-        ):
+        if telegram_file.file_size is not None and telegram_file.file_size > size_limit:
             raise ValueError(
                 f"Telegram 媒体超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT}，无法转发"
             )
-        if declared_size > TELEGRAM_ALBUM_BYTES_LIMIT:
-            raise ValueError("Telegram 媒体组超过 100 MB 上限")
 
         if self.download_client is None:
             raise RuntimeError("Telegram 媒体下载客户端尚未启动")
 
         replacement_registered = replace_existing
         replacement_handed_off = False
-        replacement_message_ids = tuple(message.message_id for message in messages)
+        replacement_message_ids = (message.message_id,)
         if replacement_registered:
-            begin_telegram_replacement(first.chat_id, replacement_message_ids)
+            begin_telegram_replacement(message.chat_id, replacement_message_ids)
 
-        media: list[TelegramMedia] = []
-        # 先按最坏情况占用队列预算，再开始网络下载。否则多个并发相册都可能先
-        # 下载完几十 MB，最后才发现预算不足，预算就失去了限制临时存储的意义。
-        reserved_bytes = sum(limit for _, _, limit, _ in sources)
+        # 先按最坏情况占用队列预算，再开始网络下载，避免下载完才发现预算不足。
+        reserved_bytes = size_limit
         await media_queue_budget.acquire(reserved_bytes)
-        reserved_items = len(sources)
         item_budget_acquired = False
+        content: MediaFile | None = None
         try:
             # 为 OneBot -> Telegram 的消费者下载保留一个临时文件槽位，避免死锁。
-            await media_item_budget.acquire(len(sources), reserve=1)
+            await media_item_budget.acquire(1, reserve=1)
             item_budget_acquired = True
-            for kind, source, size_limit, processing in sources:
-                # get_file 获取至少一小时有效的下载 URL 和更准确的文件元数据。
-                file = await source.get_file()
-                if file.file_size is not None and file.file_size > size_limit:
-                    raise ValueError(
-                        f"Telegram 媒体超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT}，无法转发"
-                    )
-                if not file.file_path:
-                    raise RuntimeError("Telegram 媒体缺少下载地址")
-
-                source_filename = getattr(source, "file_name", None)
-                filename = source_filename or Path(file.file_path).name
-                if not filename:
-                    filename = {
-                        "image": "image.jpg",
-                        "record": "voice.ogg",
-                        "video": "video.mp4",
-                    }.get(kind, "file")
-                media_type = getattr(source, "mime_type", None)
-                if not media_type:
-                    media_type = {
-                        "image": "image/jpeg",
-                        "record": "audio/ogg",
-                        "video": "video/mp4",
-                    }.get(kind, "application/octet-stream")
-                # file_size 来自 get_file，用于决定内存分档；缺失时沿用默认阈值。
-                content = MediaFile.create_reserved(
-                    filename=filename,
-                    media_type=media_type,
-                    expected_size=file.file_size,
+            # get_file 获取至少一小时有效的下载 URL 和更准确的文件元数据。
+            file = await telegram_file.get_file()
+            if file.file_size is not None and file.file_size > size_limit:
+                raise ValueError(
+                    f"Telegram 媒体超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT}，无法转发"
                 )
-                # create_reserved 消耗的是上面批量取得的名额。每成功创建一个，
-                # reserved_items 就减少一个，异常清理时只归还尚未使用的名额。
-                reserved_items -= 1
-                try:
-                    try:
-                        async with self.download_client.stream("GET", file.file_path) as response:
-                            response.raise_for_status()
-                            # 先用响应头提前拒绝，再在读取 chunk 时核对实际总大小。
-                            content_length = response.headers.get("content-length")
-                            if content_length is not None and int(content_length) > size_limit:
-                                raise ValueError(
-                                    f"Telegram 媒体超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT}，无法转发"
-                                )
-                            async for chunk in response.aiter_bytes(DOWNLOAD_CHUNK_SIZE):
-                                if content.size + len(chunk) > size_limit:
-                                    raise ValueError(
-                                        f"Telegram 媒体超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT}，无法转发"
-                                    )
-                                content.write(chunk)
-                    except httpx.HTTPError:
-                        # Telegram 文件 URL 包含 Bot Token，不能让 HTTPX 异常把 URL
-                        # 原样带进 PTB 的 traceback 日志。
-                        raise RuntimeError("Telegram 媒体下载失败") from None
-                    content.rewind()
-                    # 下载完成后游标位于文件末尾，入队前重置以供后续读取。
-                    media.append(
-                        TelegramMedia(
-                            kind=kind,
-                            content=content,
-                            processing=processing,
-                        )
-                    )
-                except BaseException:
-                    content.close()
-                    raise
+            if not file.file_path:
+                raise RuntimeError("Telegram 媒体缺少下载地址")
 
-            total_size = sum(attachment.content.size for attachment in media)
-            if total_size > TELEGRAM_ALBUM_BYTES_LIMIT:
-                raise ValueError("Telegram 媒体组超过 100 MB 上限")
-            needs_processing = any(
-                attachment.processing != "none" for attachment in media
+            source_filename = getattr(telegram_file, "file_name", None)
+            filename = source_filename or Path(file.file_path).name
+            if not filename:
+                filename = {
+                    "image": "image.jpg",
+                    "record": "voice.ogg",
+                    "video": "video.mp4",
+                }.get(kind, "file")
+            media_type = getattr(telegram_file, "mime_type", None)
+            if not media_type:
+                media_type = {
+                    "image": "image/jpeg",
+                    "record": "audio/ogg",
+                    "video": "video/mp4",
+                }.get(kind, "application/octet-stream")
+            # file_size 来自 get_file，用于决定内存分档；缺失时沿用默认阈值。
+            content = MediaFile.create_reserved(
+                filename=filename,
+                media_type=media_type,
+                expected_size=file.file_size,
             )
+            try:
+                async with self.download_client.stream("GET", file.file_path) as response:
+                    response.raise_for_status()
+                    # 先用响应头提前拒绝，再在读取 chunk 时核对实际总大小。
+                    content_length = response.headers.get("content-length")
+                    if content_length is not None and int(content_length) > size_limit:
+                        raise ValueError(
+                            f"Telegram 媒体超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT}，无法转发"
+                        )
+                    async for chunk in response.aiter_bytes(DOWNLOAD_CHUNK_SIZE):
+                        if content.size + len(chunk) > size_limit:
+                            raise ValueError(
+                                f"Telegram 媒体超过 {TELEGRAM_DOWNLOAD_LIMIT_TEXT}，无法转发"
+                            )
+                        content.write(chunk)
+            except httpx.HTTPError:
+                # Telegram 文件 URL 包含 Bot Token，不能让 HTTPX 异常把 URL
+                # 原样带进 PTB 的 traceback 日志。
+                raise RuntimeError("Telegram 媒体下载失败") from None
+            content.rewind()
+            # 下载完成后游标位于文件末尾，入队前重置以供后续读取。
+            media = (
+                TelegramMedia(
+                    kind=kind,
+                    content=content,
+                    processing=processing,
+                ),
+            )
+
+            needs_processing = processing != "none"
             if not needs_processing:
                 # 图片大小不会再改变，可以立即归还下载前的保守预留。
-                await media_queue_budget.release(reserved_bytes - total_size)
-                reserved_bytes = total_size
-            message = TelegramMessage(
-                message_ids=tuple(message.message_id for message in messages),
-                group_id=first.chat_id,
+                await media_queue_budget.release(reserved_bytes - content.size)
+                reserved_bytes = content.size
+            forwarded = TelegramMessage(
+                message_ids=(message.message_id,),
+                group_id=message.chat_id,
                 user_id=user_id,
                 sender_name=sender_name,
-                text=next((message.caption for message in messages if message.caption), None),
+                text=message.caption,
                 bot_forward_required=bool(
-                    first.from_user is not None
-                    and getattr(first.from_user, "is_bot", False)
-                    and not is_anonymous_sender(first)
+                    message.from_user is not None
+                    and getattr(message.from_user, "is_bot", False)
+                    and not is_anonymous_sender(message)
                 ),
-                forwarded_from=next(
-                    (
-                        name
-                        for message in messages
-                        if (
-                            name := forward_origin_name(
-                                getattr(message, "forward_origin", None)
-                            )
-                        )
-                        is not None
-                    ),
-                    None,
+                forwarded_from=forward_origin_name(
+                    getattr(message, "forward_origin", None)
                 ),
-                reply_message_id=next(
-                    (
-                        message.reply_to_message.message_id
-                        for message in messages
-                        if message.reply_to_message is not None
-                    ),
-                    None,
+                reply_message_id=(
+                    message.reply_to_message.message_id
+                    if message.reply_to_message is not None
+                    else None
                 ),
                 replace_existing=replace_existing,
-                # 媒体组 caption 通常只附在其中一项，取第一条非空文本。
-                media=tuple(media),
+                media=media,
                 # 视频转码可能改变大小，预处理完成前保留最坏情况预算。
                 queue_bytes=reserved_bytes,
             )
             if needs_processing:
-                task = telegram_processing_task(message, q_gateway, first.get_bot())
+                task = telegram_processing_task(forwarded, q_gateway, message.get_bot())
                 if not media_processor.submit(task):
                     raise ValueError("Telegram 媒体处理队列已满，请稍后重试")
                 replacement_handed_off = True
             else:
                 try:
                     await message_bus.put(
-                        telegram_forward_task(message, q_gateway, first.get_bot())
+                        telegram_forward_task(forwarded, q_gateway, message.get_bot())
                     )
                 except SendTargetUnavailableError as error:
                     raise ValueError(ONEBOT_SEND_FAILED_TEXT) from error
                 replacement_handed_off = True
         except BaseException:
-            # BaseException 包含任务取消；关停时取消相册任务也必须关闭临时文件，
+            # BaseException 包含任务取消；关停时取消处理任务也必须关闭临时文件，
             # 并归还已经取得但尚未使用的两类预算。
-            for attachment in media:
-                attachment.content.close()
-            if item_budget_acquired and reserved_items:
-                media_item_budget.release(reserved_items)
+            if content is not None:
+                # content 持有自己的文件名额，close() 会归还；未创建的则手动归还。
+                content.close()
+            elif item_budget_acquired:
+                media_item_budget.release()
             if reserved_bytes:
                 await media_queue_budget.release(reserved_bytes)
             if replacement_registered and not replacement_handed_off:
-                finish_telegram_replacement(first.chat_id, replacement_message_ids)
+                finish_telegram_replacement(message.chat_id, replacement_message_ids)
             raise
-
-        if not media:
-            return
 
     def get_handlers(self) -> list[BaseHandler]:
         """显式创建全部 PTB handlers，注册顺序与匹配优先级一目了然。"""

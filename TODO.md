@@ -35,7 +35,7 @@
   - Telegram 侧置顶消息时，会同步添加 OneBot 精华消息
   - TG侧由于BotAPI限制，取消置顶需要回复目标消息使用 `/unpin` 命令
 
-Telegram 媒体组最多支持 10 项、合计 100 MB；其中每项仍受 20 MB 上限限制。
+Telegram 发往 OneBot 时，相册中的每张图片都作为独立消息逐条转发，每项仍受 20 MB 上限限制。
 
 # 仅 OneBot 到 TG 的消息
 

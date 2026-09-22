@@ -152,7 +152,7 @@ class TestTelegramBotForward:
                 return_value=False,
             ),
         ):
-            await handler._enqueue_media([message], bot_id=700004)
+            await handler._enqueue_media(message, bot_id=700004)
 
         video.get_file.assert_not_awaited()
 

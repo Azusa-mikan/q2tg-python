@@ -53,7 +53,7 @@ class TestTelegramSticker:
                 ),
                 patch("src.tgbot.handlers.media_processor.submit", return_value=True) as submit,
             ):
-                await handler._enqueue_media([message])
+                await handler._enqueue_media(message)
             task = submit.call_args.args[0]
             assert isinstance(task, ProcessingTask)
             assert isinstance(task.run, partial)
@@ -134,7 +134,7 @@ class TestTelegramSticker:
                 patch("src.tgbot.handlers.media_processor.submit", return_value=False),
                 pytest.raises(ValueError, match="媒体处理队列已满"),
             ):
-                await handler._enqueue_media([message])
+                await handler._enqueue_media(message)
         finally:
             await handler.download_client.aclose()
 
