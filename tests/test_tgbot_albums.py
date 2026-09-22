@@ -1,4 +1,3 @@
-import asyncio
 from functools import partial
 from types import SimpleNamespace
 from typing import Any, cast
@@ -21,20 +20,14 @@ from src.tgbot.handlers import TELEGRAM_DOWNLOAD_LIMIT, TELEGRAM_VIDEO_LIMIT, TG
 
 @pytest.mark.asyncio
 class TestTelegramAlbum:
-    async def test_cancelled_flush_removes_pending_album(self) -> None:
+    async def test_media_group_state_is_not_kept(self) -> None:
+        # 相册不再聚合：handler 不再持有 _albums / _album_tasks / _flush_album。
         handler = TGhandlers()
-        message = cast(Message, SimpleNamespace())
-        handler._albums["album"] = [message]
+        assert not hasattr(handler, "_albums")
+        assert not hasattr(handler, "_album_tasks")
+        assert not hasattr(handler, "_flush_album")
 
-        with patch("src.tgbot.handlers.asyncio.sleep", new_callable=AsyncMock) as sleep:
-            sleep.side_effect = asyncio.CancelledError
-            with pytest.raises(asyncio.CancelledError):
-                await handler._flush_album("album")
-
-        assert "album" not in handler._albums
-        assert "album" not in handler._album_tasks
-
-    async def test_mixed_media_group_is_downloaded_in_message_order(self) -> None:
+    async def test_each_album_item_is_downloaded_separately(self) -> None:
         initial_items = media_item_budget.used
         initial_bytes = media_queue_budget.used
 
@@ -64,54 +57,78 @@ class TestTelegramAlbum:
         )
         user = SimpleNamespace(id=7, full_name="Telegram User")
         bot = SimpleNamespace()
-        messages = [
-            cast(
-                Message,
-                SimpleNamespace(
-                    message_id=2,
-                    chat_id=-456,
-                    from_user=user,
-                    video=video,
-                    photo=(),
-                    document=None,
-                    caption=None,
-                    reply_to_message=None,
-                    get_bot=lambda: bot,
-                ),
+        video_message = cast(
+            Message,
+            SimpleNamespace(
+                message_id=2,
+                chat_id=-456,
+                from_user=user,
+                media_group_id="album",
+                video=video,
+                photo=(),
+                document=None,
+                sticker=None,
+                voice=None,
+                audio=None,
+                caption=None,
+                reply_to_message=None,
+                get_bot=lambda: bot,
             ),
-            cast(
-                Message,
-                SimpleNamespace(
-                    message_id=1,
-                    chat_id=-456,
-                    from_user=user,
-                    video=None,
-                    photo=(photo,),
-                    document=None,
-                    caption="caption",
-                    reply_to_message=None,
-                    get_bot=lambda: bot,
-                ),
+        )
+        photo_message = cast(
+            Message,
+            SimpleNamespace(
+                message_id=1,
+                chat_id=-456,
+                from_user=user,
+                media_group_id="album",
+                video=None,
+                photo=(photo,),
+                document=None,
+                sticker=None,
+                voice=None,
+                audio=None,
+                caption="caption",
+                reply_to_message=None,
+                get_bot=lambda: bot,
             ),
-        ]
+        )
         handler = TGhandlers()
         handler.download_client = httpx.AsyncClient(transport=httpx.MockTransport(download))
         try:
             with (
                 patch("src.tgbot.handlers.sql.get_tg_forward_enabled", new_callable=AsyncMock, return_value=True),
                 patch("src.tgbot.handlers.media_processor.submit", return_value=True) as submit,
+                patch("src.tgbot.handlers.message_bus.put", new_callable=AsyncMock) as put,
             ):
-                await handler._enqueue_media(messages)
+                await handler._enqueue_media(video_message)
+                await handler._enqueue_media(photo_message)
 
+            # 视频需要预处理，图片直接入队；两条相册项各自独立转发。
+            assert submit.call_count == 1
+            assert put.await_count == 1
+
+            assert submit.call_args is not None
             task = submit.call_args.args[0]
             assert isinstance(task, ProcessingTask)
             assert isinstance(task.run, partial)
-            message = task.run.args[0]
-            assert isinstance(message, TelegramMessage)
-            assert message.message_ids == (1, 2)
-            assert [item.kind for item in message.media] == ["image", "video"]
-            assert message.text == "caption"
+            video_forwarded = task.run.args[0]
+            assert isinstance(video_forwarded, TelegramMessage)
             await task.cleanup()
+
+            assert put.await_args is not None
+            photo_task = put.await_args.args[0]
+            photo_forwarded = photo_task.send.args[0]
+            assert isinstance(photo_forwarded, TelegramMessage)
+            assert photo_task.finalize is not None
+            await photo_task.finalize()
+
+            # 每条相册项各自成为一条消息，message_ids 不再合并成元组。
+            assert video_forwarded.message_ids == (2,)
+            assert photo_forwarded.message_ids == (1,)
+            assert video_forwarded.media[0].kind == "video"
+            assert photo_forwarded.media[0].kind == "image"
+            assert photo_forwarded.text == "caption"
         finally:
             await handler.download_client.aclose()
 
@@ -143,7 +160,7 @@ class TestTelegramAlbum:
             ),
             pytest.raises(ValueError, match="媒体超过 20 MB，无法转发"),
         ):
-            await handler._enqueue_media([message])
+            await handler._enqueue_media(message)
 
         video.get_file.assert_not_awaited()
 
@@ -190,7 +207,7 @@ class TestTelegramAlbum:
                 ),
                 patch("src.tgbot.handlers.message_bus.put", new_callable=AsyncMock) as put,
             ):
-                await handler._enqueue_media([message])
+                await handler._enqueue_media(message)
 
             assert put.await_args is not None
             task = put.await_args.args[0]
@@ -252,7 +269,7 @@ class TestTelegramAlbum:
                 ),
                 patch("src.tgbot.handlers.message_bus.put", new_callable=AsyncMock) as put,
             ):
-                await handler._enqueue_media([message])
+                await handler._enqueue_media(message)
 
             assert put.await_args is not None
             task = put.await_args.args[0]
@@ -309,7 +326,7 @@ class TestTelegramAlbum:
                 ),
                 patch("src.tgbot.handlers.message_bus.put", new_callable=AsyncMock) as put,
             ):
-                await handler._enqueue_media([message])
+                await handler._enqueue_media(message)
             assert put.await_args is not None
             task = put.await_args.args[0]
             assert task.finalize is not None
@@ -363,7 +380,7 @@ class TestTelegramAlbum:
                 ),
                 patch("src.tgbot.handlers.message_bus.put", new_callable=AsyncMock) as put,
             ):
-                await handler._enqueue_media([message])
+                await handler._enqueue_media(message)
             assert put.await_args is not None
             task = put.await_args.args[0]
             content = task.send.args[0].media[0].content
@@ -419,7 +436,7 @@ class TestTelegramAlbum:
                 ),
                 patch("src.tgbot.handlers.message_bus.put", new_callable=AsyncMock) as put,
             ):
-                await handler._enqueue_media([message])
+                await handler._enqueue_media(message)
             assert put.await_args is not None
             task = put.await_args.args[0]
             content = task.send.args[0].media[0].content
