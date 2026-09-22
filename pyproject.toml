@@ -29,6 +29,8 @@ dependencies = [
     "pilk==0.2.4",
     # 获取当前进程的常驻内存大小。
     "psutil==7.2.2",
+    # 将 Telegram TGS 动态贴纸渲染为透明 GIF；轮子内置 librlottie，无需 Docker。
+    "rlottie-python==1.3.8",
     # .env 应用配置的字段类型校验与加载。
     "pydantic==2.13.4",
     "pydantic-settings==2.14.2",

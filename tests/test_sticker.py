@@ -1,6 +1,7 @@
 import asyncio
 import gzip
 import io
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -11,6 +12,76 @@ from PIL import Image
 
 from src.media import MediaFile, media_item_budget
 from src.sticker import static_sticker_to_png, tgs_sticker_to_gif, video_sticker_to_gif
+
+_ANIMATED_TGS = {
+    "v": "5.7.4",
+    "fr": 30,
+    "ip": 0,
+    "op": 30,
+    "w": 64,
+    "h": 64,
+    "nm": "test",
+    "ddd": 0,
+    "assets": [],
+    "layers": [
+        {
+            "ddd": 0,
+            "ind": 1,
+            "ty": 4,
+            "nm": "circle",
+            "sr": 1,
+            "ks": {
+                "o": {"a": 0, "k": 100},
+                "r": {"a": 0, "k": 0},
+                "p": {
+                    "a": 1,
+                    "k": [
+                        {
+                            "t": 0,
+                            "s": [10, 32, 0],
+                            "i": {"x": [0.5], "y": [0.5]},
+                            "o": {"x": [0.5], "y": [0.5]},
+                        },
+                        {"t": 30, "s": [54, 32, 0]},
+                    ],
+                },
+                "a": {"a": 0, "k": [0, 0, 0]},
+                "s": {"a": 0, "k": [100, 100, 100]},
+            },
+            "ao": 0,
+            "shapes": [
+                {
+                    "ty": "gr",
+                    "it": [
+                        {
+                            "d": 1,
+                            "ty": "el",
+                            "s": {"a": 0, "k": [40, 40]},
+                            "p": {"a": 0, "k": [0, 0]},
+                        },
+                        {
+                            "ty": "fl",
+                            "c": {"a": 0, "k": [1, 0, 0, 1]},
+                            "o": {"a": 0, "k": 100},
+                        },
+                        {
+                            "ty": "tr",
+                            "p": {"a": 0, "k": [0, 0]},
+                            "a": {"a": 0, "k": [0, 0]},
+                            "s": {"a": 0, "k": [100, 100]},
+                            "r": {"a": 0, "k": 0},
+                            "o": {"a": 0, "k": 100},
+                        },
+                    ],
+                }
+            ],
+            "ip": 0,
+            "op": 30,
+            "st": 0,
+        }
+    ],
+}
+_ANIMATED_TGS_JSON = json.dumps(_ANIMATED_TGS).encode()
 
 
 @pytest.mark.asyncio
@@ -119,6 +190,7 @@ class TestStickerConversion:
         try:
             with (
                 patch("src.sticker.asyncio.create_subprocess_exec", side_effect=create_process),
+                patch("src.sticker.LottieAnimation", None),
                 patch(
                     "src.sticker.CONTAINER_MARKER",
                     SimpleNamespace(is_file=Mock(return_value=True)),
@@ -136,6 +208,43 @@ class TestStickerConversion:
             assert commands[0][:2] == ("bash", "/usr/local/bin/lottie_to_gif.sh")
             assert "--fps" in commands[0]
             assert len(commands) == 1
+            info.assert_called_once_with("TGS 贴纸转码完成，耗时 %.2f 秒", 1.5)
+        finally:
+            media.close()
+        assert media_item_budget.used == initial_items
+
+    async def test_tgs_sticker_uses_bundled_rlottie_without_docker(self) -> None:
+        pytest.importorskip("rlottie_python")
+        initial_items = media_item_budget.used
+        media = await MediaFile.create(
+            filename="sticker.tgs",
+            media_type="application/x-tgsticker",
+        )
+        media.write(gzip.compress(_ANIMATED_TGS_JSON))
+
+        async def unexpected_process(*args: str, **kwargs):
+            raise AssertionError(f"不应启动外部转换器: {args!r}")
+
+        try:
+            with (
+                patch(
+                    "src.sticker.asyncio.create_subprocess_exec",
+                    side_effect=unexpected_process,
+                ),
+                patch(
+                    "src.sticker.time",
+                    SimpleNamespace(monotonic=Mock(side_effect=[50.0, 51.5])),
+                ),
+                patch("src.sticker.baselog.info") as info,
+            ):
+                await tgs_sticker_to_gif(media)
+            assert media.filename == "sticker.gif"
+            assert media.media_type == "image/gif"
+            assert media.file.read(6) in {b"GIF87a", b"GIF89a"}
+            media.rewind()
+            with Image.open(media.file) as converted:
+                assert converted.format == "GIF"
+                assert getattr(converted, "n_frames", 1) > 1
             info.assert_called_once_with("TGS 贴纸转码完成，耗时 %.2f 秒", 1.5)
         finally:
             media.close()
@@ -164,6 +273,7 @@ class TestStickerConversion:
         try:
             with (
                 patch("src.sticker.asyncio.create_subprocess_exec", side_effect=create_process),
+                patch("src.sticker.LottieAnimation", None),
                 patch(
                     "src.sticker.CONTAINER_MARKER",
                     SimpleNamespace(is_file=Mock(return_value=False)),

@@ -340,7 +340,7 @@ ID 搜索已绑定 OneBot 群的成员；选择成员后会发送真正的 OneBo
 - OneBot 发往 Telegram 的图片组合计上限为 49 MiB；云端 Bot API 对单次请求体的上限为
   50 MiB，超出会返回 413
 - 视频、语音和贴纸转换依赖 ffmpeg、ffprobe、Pillow、pilk 与
-  [lottie-converter](https://github.com/ed-asriyan/lottie-converter)
+  [rlottie](https://github.com/Samsung/rlottie)（由 `rlottie-python` 轮子内置）
 - TGS 输入仍受 Telegram Bot API 下载上限限制；转换后的 GIF 不设置额外大小上限
 - 使用默认 SQLite 时，删除容器前未持久化 `/app/data` 会丢失群绑定和消息映射
 
@@ -422,9 +422,11 @@ mysql://user:password@host:3306/q2tg
 postgresql://user:password@host:5432/q2tg
 ```
 
-本地运行时，TGS 动态贴纸转换要求已安装 Docker，Docker daemon 正在运行，并且当前用户
-有权执行 `docker run`。项目会自动调用固定版本的 `lottie-converter` 镜像，不使用
-`sudo`。项目自身的 Docker 镜像内置转换工具，不会在容器中再次启动 Docker。
+本地运行时，TGS 动态贴纸通过依赖中的 `rlottie-python` 直接转换，无需 Docker。只有在
+无法加载 rlottie 原生库时，才会回退到固定版本的
+[lottie-converter](https://github.com/ed-asriyan/lottie-converter)：容器内使用内置脚本，
+容器外则要求已安装 Docker、Docker daemon 正在运行且当前用户有权执行 `docker run`
+（不使用 `sudo`）。
 
 使用 `docker-compose-debug.yaml` 启动本地构建的镜像时，容器以 UID `10001` 读写项目的
 `data` 目录。本地进程与 debug 容器需要轮流使用同一个数据目录时，先停止两边的 q2tg
